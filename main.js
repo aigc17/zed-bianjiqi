@@ -31,9 +31,8 @@ function getWindowConfig() {
   const { width } = screen.getPrimaryDisplay().workAreaSize;
   return {
     width, height: BAR_HEIGHT, x: 0, y: 0,
-    frame: false, transparent: false, alwaysOnTop: true,
+    frame: false, transparent: true, alwaysOnTop: true,
     resizable: false, skipTaskbar: true, hasShadow: false,
-    backgroundColor: '#1e1e1e',
     webPreferences: { nodeIntegration: true, contextIsolation: false },
   };
 }
