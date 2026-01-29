@@ -1,8 +1,9 @@
 /**
  * [INPUT]: electron - Electron 框架
  * [INPUT]: AppleScript - macOS 窗口控制，通过 System Events 检测/激活 Zed 窗口
- * [INPUT]: Zed SQLite DB - 读取工作区路径信息
- * [OUTPUT]: 主进程，创建悬浮标签栏窗口，提供 IPC 接口
+ * [INPUT]: Zed SQLite DB - 异步读取并缓存工作区路径信息
+ * [INPUT]: dialog_state.json - 记录上次选择的目录，用于系统对话框 defaultPath（避开慢路径）
+ * [OUTPUT]: 主进程，创建悬浮标签栏窗口，提供 IPC 接口（含系统对话框前置处理与默认路径优化）
  * [POS]: 应用入口，管理窗口生命周期、IPC 通信、智能切换 Zed 窗口（已打开激活，未打开新建）
  *
  * [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
@@ -10,7 +11,7 @@
 
 const { app, BrowserWindow, ipcMain, screen, globalShortcut } = require('electron');
 const path = require('path');
-const { exec, execSync } = require('child_process');
+const { exec } = require('child_process');
 const fs = require('fs');
 
 // ============================================================================
@@ -18,10 +19,17 @@ const fs = require('fs');
 // ============================================================================
 
 const CONFIG_PATH = path.join(app.getPath('userData'), 'projects.json');
+const DIALOG_STATE_PATH = path.join(app.getPath('userData'), 'dialog_state.json');
 const ZED_DB_PATH = path.join(app.getPath('home'), 'Library/Application Support/Zed/db/0-stable/db.sqlite');
 const BAR_HEIGHT = 36;
+const ZED_WORKSPACE_CACHE_TTL_MS = 60 * 1000;
+const DIALOG_SLOW_THRESHOLD_MS = 2000;
 
 let mainWindow = null;
+let isSystemDialogOpen = false;
+let dialogState = { lastFolderPath: null };
+let zedWorkspaceCache = { mapping: {}, lastUpdated: 0 };
+let zedWorkspaceRefreshPromise = null;
 
 // ============================================================================
 // WINDOW CREATION
@@ -49,14 +57,14 @@ function createWindow() {
 // PROJECT DATA
 // ============================================================================
 
-function loadProjects() {
+async function loadProjects() {
   try {
     if (fs.existsSync(CONFIG_PATH)) {
       let projects = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf-8'));
 
       // 数据迁移：旧格式 { name } -> 新格式 { path, displayName }
       let needsMigration = false;
-      const workspaces = getZedWorkspaces();
+      const workspaces = await getZedWorkspacesFresh();
 
       projects = projects.map(p => {
         if (p.name && !p.path && !p.displayName) {
@@ -99,28 +107,123 @@ function saveProjects(projects) {
 }
 
 // ============================================================================
+// DIALOG STATE
+// ============================================================================
+
+function loadDialogState() {
+  try {
+    if (fs.existsSync(DIALOG_STATE_PATH)) {
+      const state = JSON.parse(fs.readFileSync(DIALOG_STATE_PATH, 'utf-8'));
+      return {
+        lastFolderPath: state.lastFolderPath || null,
+      };
+    }
+  } catch (e) {
+    console.error('Failed to load dialog state:', e);
+  }
+  return { lastFolderPath: null };
+}
+
+function saveDialogState(state) {
+  try {
+    fs.writeFileSync(DIALOG_STATE_PATH, JSON.stringify(state, null, 2));
+  } catch (e) {
+    console.error('Failed to save dialog state:', e);
+  }
+}
+
+function isSlowDialogPath(folderPath) {
+  if (!folderPath) return true;
+  const normalized = path.normalize(folderPath);
+
+  // 云盘/网络卷常触发首次枚举卡顿
+  if (normalized.includes('/Library/CloudStorage/')) return true;
+  if (normalized.includes('/Library/Mobile Documents/')) return true;
+  if (normalized.startsWith('/Volumes/')) return true;
+  if (normalized.startsWith('/Network/')) return true;
+
+  return false;
+}
+
+function resolveDialogDefaultPath() {
+  const lastFolderPath = dialogState.lastFolderPath;
+  if (lastFolderPath && fs.existsSync(lastFolderPath) && !isSlowDialogPath(lastFolderPath)) {
+    return lastFolderPath;
+  }
+
+  const downloadsPath = app.getPath('downloads');
+  if (downloadsPath && fs.existsSync(downloadsPath)) {
+    return downloadsPath;
+  }
+
+  return app.getPath('home');
+}
+
+// ============================================================================
 // ZED DATABASE - 读取工作区路径
 // ============================================================================
 
-function getZedWorkspaces() {
-  // 从 Zed 数据库读取所有工作区路径，返回 { name -> path } 映射
-  try {
-    const result = execSync(`sqlite3 '${ZED_DB_PATH}' "SELECT paths FROM workspaces WHERE paths IS NOT NULL ORDER BY timestamp DESC;"`).toString();
-    const mapping = {};
-    result.trim().split('\n').forEach(p => {
-      if (p) {
-        const name = path.basename(p);
-        // 如果有同名项目，保留最近使用的（先出现的）
-        if (!mapping[name]) {
-          mapping[name] = p;
-        }
+function parseZedWorkspaces(raw) {
+  const mapping = {};
+  raw.trim().split('\n').forEach(p => {
+    if (!p) return;
+    const name = path.basename(p);
+    // 如果有同名项目，保留最近使用的（先出现的）
+    if (!mapping[name]) {
+      mapping[name] = p;
+    }
+  });
+  return mapping;
+}
+
+function refreshZedWorkspaces() {
+  if (zedWorkspaceRefreshPromise) return zedWorkspaceRefreshPromise;
+
+  zedWorkspaceRefreshPromise = new Promise((resolve) => {
+    const sql = 'SELECT paths FROM workspaces WHERE paths IS NOT NULL ORDER BY timestamp DESC;';
+    exec(`sqlite3 '${ZED_DB_PATH}' "${sql}"`, (err, stdout) => {
+      if (err) {
+        console.error('Failed to read Zed database:', err);
+        zedWorkspaceRefreshPromise = null;
+        return resolve(zedWorkspaceCache.mapping);
       }
+
+      const output = stdout ? stdout.trim() : '';
+      const mapping = output ? parseZedWorkspaces(output) : {};
+      zedWorkspaceCache = {
+        mapping,
+        lastUpdated: Date.now(),
+      };
+      zedWorkspaceRefreshPromise = null;
+      resolve(mapping);
     });
-    return mapping;
-  } catch (e) {
-    console.error('Failed to read Zed database:', e);
-    return {};
+  });
+
+  return zedWorkspaceRefreshPromise;
+}
+
+function getZedWorkspacesCached() {
+  // 返回缓存映射并触发后台刷新，避免阻塞 UI
+  const now = Date.now();
+  const isStale = !zedWorkspaceCache.lastUpdated
+    || (now - zedWorkspaceCache.lastUpdated > ZED_WORKSPACE_CACHE_TTL_MS);
+
+  if (isStale) {
+    refreshZedWorkspaces();
   }
+  return zedWorkspaceCache.mapping;
+}
+
+async function getZedWorkspacesFresh() {
+  // 需要可靠映射时使用，等待刷新完成
+  const now = Date.now();
+  const isStale = !zedWorkspaceCache.lastUpdated
+    || (now - zedWorkspaceCache.lastUpdated > ZED_WORKSPACE_CACHE_TTL_MS);
+
+  if (isStale) {
+    return await refreshZedWorkspaces();
+  }
+  return zedWorkspaceCache.mapping;
 }
 
 // ============================================================================
@@ -152,11 +255,11 @@ function getZedWindows() {
       if not (exists process "Zed") then return ""
       tell process "Zed" to get name of every window
     end tell`;
-    exec(`osascript -e '${script}'`, (err, stdout) => {
+    exec(`osascript -e '${script}'`, async (err, stdout) => {
       if (err || !stdout.trim()) return resolve([]);
 
       // 获取 Zed 数据库中的路径映射
-      const workspaces = getZedWorkspaces();
+      const workspaces = getZedWorkspacesCached();
 
       let emptyCount = 0;
       const windows = stdout.trim().split(', ')
@@ -232,7 +335,7 @@ function activateZedWindowByName(windowName) {
 // IPC HANDLERS
 // ============================================================================
 
-ipcMain.handle('get-projects', () => loadProjects());
+ipcMain.handle('get-projects', async () => loadProjects());
 
 ipcMain.handle('save-projects', (_, projects) => {
   saveProjects(projects);
@@ -256,27 +359,57 @@ ipcMain.handle('set-window-height', (_, height) => {
   if (mainWindow) mainWindow.setSize(mainWindow.getSize()[0], height);
 });
 
-ipcMain.handle('select-folder', async () => {
+ipcMain.handle('select-folder', async (event) => {
   const { dialog } = require('electron');
+  const targetWindow = (event && BrowserWindow.fromWebContents(event.sender)) || mainWindow;
+  const previousAlwaysOnTop = targetWindow ? targetWindow.isAlwaysOnTop() : false;
+  const defaultPath = resolveDialogDefaultPath();
 
-  // 临时取消 alwaysOnTop，避免对话框卡顿
-  if (mainWindow) {
-    mainWindow.setAlwaysOnTop(false);
+  // 暂停隐藏检查，避免焦点干扰
+  isSystemDialogOpen = true;
+
+  if (targetWindow) {
+    targetWindow.setAlwaysOnTop(false);
+    targetWindow.show();
+    targetWindow.focus();
+    if (process.platform === 'darwin') {
+      app.focus({ steal: true });
+    }
   }
 
-  const result = await dialog.showOpenDialog({
+  const dialogOptions = {
     properties: ['openDirectory'],
-  });
+    defaultPath,
+    dontAddToRecent: true,
+  };
 
-  // 恢复 alwaysOnTop
-  if (mainWindow) {
-    mainWindow.setAlwaysOnTop(true);
-  }
+  const startTime = Date.now();
+  try {
+    const result = targetWindow
+      ? await dialog.showOpenDialog(targetWindow, dialogOptions)
+      : await dialog.showOpenDialog(dialogOptions);
 
-  if (!result.canceled && result.filePaths.length > 0) {
-    return result.filePaths[0];
+    const duration = Date.now() - startTime;
+    if (duration > DIALOG_SLOW_THRESHOLD_MS) {
+      console.warn(`[select-folder] 对话框打开耗时 ${duration}ms`, {
+        defaultPath,
+        lastFolderPath: dialogState.lastFolderPath,
+      });
+    }
+
+    if (!result.canceled && result.filePaths.length > 0) {
+      const selectedPath = result.filePaths[0];
+      dialogState = { ...dialogState, lastFolderPath: selectedPath };
+      saveDialogState(dialogState);
+      return selectedPath;
+    }
+    return null;
+  } finally {
+    if (targetWindow) {
+      targetWindow.setAlwaysOnTop(previousAlwaysOnTop);
+    }
+    isSystemDialogOpen = false;
   }
-  return null;
 });
 
 ipcMain.handle('open-folder-in-zed', (_, folderPath) => {
@@ -293,7 +426,13 @@ function startHideCheck() {
   let lastFrontApp = '';
 
   setInterval(() => {
+    if (isSystemDialogOpen) {
+      console.log('[hideCheck] 跳过 - 对话框打开中');
+      return;
+    }
+    console.log('[hideCheck] 执行 osascript', Date.now());
     exec(`osascript -e 'tell application "System Events" to get name of first process whose frontmost is true' 2>/dev/null`, (err, stdout) => {
+      console.log('[hideCheck] osascript 返回', Date.now());
       if (err || !mainWindow) return;
       const frontApp = stdout.trim().toLowerCase();
       const shouldShow = frontApp === 'zed' || frontApp === 'electron';
@@ -315,11 +454,12 @@ function startHideCheck() {
 
 app.whenReady().then(() => {
   createWindow();
+  dialogState = loadDialogState();
   startHideCheck();
   
   for (let i = 1; i <= 9; i++) {
-    globalShortcut.register(`CommandOrControl+Alt+${i}`, () => {
-      const projects = loadProjects();
+    globalShortcut.register(`CommandOrControl+Alt+${i}`, async () => {
+      const projects = await loadProjects();
       const p = projects[i - 1];
       if (p) {
         // 用 path 的 basename 或 displayName 匹配窗口

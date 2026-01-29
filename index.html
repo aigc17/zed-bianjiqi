@@ -1,4 +1,12 @@
 <!DOCTYPE html>
+<!--
+  [INPUT]: ipcRenderer - 渲染进程与主进程通信，调用项目管理与系统对话框 IPC
+  [INPUT]: main.js - 提供窗口管理、项目持久化、文件夹选择等主进程能力
+  [OUTPUT]: 顶部标签栏 UI、交互逻辑、项目列表渲染与拖拽排序
+  [POS]: 渲染进程入口，承载 Zed 项目标签栏的可视化与交互
+  
+  [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
+-->
 <html>
 <head>
   <meta charset="UTF-8">
@@ -373,12 +381,15 @@
     }
 
     async function selectNewFolder() {
+      console.log('[renderer] selectNewFolder 开始', Date.now());
       // 直接关闭下拉菜单，不等待
       document.getElementById('dropdown').classList.remove('show');
       dropdownOpen = false;
       ipcRenderer.invoke('set-window-height', 36); // 不 await
+      console.log('[renderer] 准备调用 select-folder', Date.now());
 
       const folderPath = await ipcRenderer.invoke('select-folder');
+      console.log('[renderer] select-folder 返回', Date.now());
       if (folderPath) {
         const displayName = await ipcRenderer.invoke('open-folder-in-zed', folderPath);
         projects.push({
