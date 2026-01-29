@@ -258,9 +258,21 @@ ipcMain.handle('set-window-height', (_, height) => {
 
 ipcMain.handle('select-folder', async () => {
   const { dialog } = require('electron');
-  const result = await dialog.showOpenDialog(mainWindow, {
+
+  // 临时取消 alwaysOnTop，避免对话框被遮挡或卡顿
+  if (mainWindow) {
+    mainWindow.setAlwaysOnTop(false);
+  }
+
+  const result = await dialog.showOpenDialog({
     properties: ['openDirectory'],
   });
+
+  // 恢复 alwaysOnTop
+  if (mainWindow) {
+    mainWindow.setAlwaysOnTop(true);
+  }
+
   if (!result.canceled && result.filePaths.length > 0) {
     return result.filePaths[0];
   }
