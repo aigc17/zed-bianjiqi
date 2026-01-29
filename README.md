@@ -31,6 +31,18 @@ npm install
 npm start
 ```
 
+## 日常启动
+
+本应用是纯本地桌面应用，**不占用任何网络端口**，不会与其他开发项目冲突。
+
+```bash
+# 进入项目目录启动
+cd /path/to/zed-bianjiqi && npm start
+
+# 或后台运行（不占用终端）
+cd /path/to/zed-bianjiqi && npm start &
+```
+
 ## 开机自启（可选）
 
 ### 方法一：LaunchAgent（推荐）
