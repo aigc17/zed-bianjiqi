@@ -195,14 +195,13 @@
     // ========================================================================
     // RENDER
     // ========================================================================
-    
+
     function render() {
       const container = document.getElementById('tabs');
       container.innerHTML = projects.map((p, i) => `
         <div class="tab ${i === activeIndex ? 'active' : ''}" data-index="${i}" draggable="true"
              style="${p.color ? `border-left: 3px solid ${p.color}` : ''}">
-          ${p.color ? `<span class="color-indicator" style="background:${p.color}"></span>` : ''}
-          <span class="name">${p.displayName || p.name}</span>
+          <span class="name">${p.displayName}</span>
           ${i < 9 ? `<span class="shortcut">⌥${i + 1}</span>` : ''}
           <span class="close" data-action="remove">×</span>
         </div>
@@ -320,54 +319,67 @@
         await ipcRenderer.invoke('set-window-height', 36);
         return;
       }
-      
+
+      // windows 现在是对象数组: { windowName, path, displayName }
       const windows = await ipcRenderer.invoke('get-zed-windows');
-      const existingNames = projects.map(p => p.name);
-      const available = windows.filter(w => !existingNames.includes(w));
-      
+      const existingPaths = projects.map(p => p.path).filter(Boolean);
+
+      // 过滤已添加的窗口（用 path 匹配）
+      const available = windows.filter(w => {
+        if (!w.path) return true; // empty project 没有 path，始终显示
+        return !existingPaths.includes(w.path);
+      });
+
       let html = '<div class="dropdown-item new-folder" data-action="new-folder">📂 选择文件夹新建...</div>';
-      
+
       if (available.length > 0) {
         html += '<div class="dropdown-divider"></div>';
         html += '<div class="dropdown-label">已打开的窗口</div>';
-        html += available.map(name => 
-          `<div class="dropdown-item" data-name="${name}">${name}</div>`
+        html += available.map((w, i) =>
+          `<div class="dropdown-item" data-index="${i}">${w.displayName}</div>`
         ).join('');
       }
-      
+
       dropdown.innerHTML = html;
-      
+
       dropdown.querySelector('[data-action="new-folder"]').addEventListener('click', selectNewFolder);
-      dropdown.querySelectorAll('.dropdown-item[data-name]').forEach(item => {
-        item.addEventListener('click', () => addFromDropdown(item.dataset.name));
+      dropdown.querySelectorAll('.dropdown-item[data-index]').forEach(item => {
+        const w = available[parseInt(item.dataset.index)];
+        item.addEventListener('click', () => addFromDropdown(w));
       });
-      
+
       dropdown.classList.add('show');
       dropdownOpen = true;
       const itemCount = available.length + 1;
       const dropdownHeight = Math.min(itemCount * 42 + 60, 400);
       await ipcRenderer.invoke('set-window-height', 36 + dropdownHeight);
     }
-    
+
     async function selectNewFolder() {
       await closeDropdown();
       const folderPath = await ipcRenderer.invoke('select-folder');
       if (folderPath) {
-        const name = await ipcRenderer.invoke('open-folder-in-zed', folderPath);
-        projects.push({ name });
+        const displayName = await ipcRenderer.invoke('open-folder-in-zed', folderPath);
+        projects.push({
+          path: folderPath,
+          displayName: displayName
+        });
         await ipcRenderer.invoke('save-projects', projects);
         render();
       }
     }
-    
+
     async function closeDropdown() {
       document.getElementById('dropdown').classList.remove('show');
       dropdownOpen = false;
       await ipcRenderer.invoke('set-window-height', 36);
     }
-    
-    async function addFromDropdown(name) {
-      projects.push({ name });
+
+    async function addFromDropdown(w) {
+      projects.push({
+        path: w.path,
+        displayName: w.displayName
+      });
       await ipcRenderer.invoke('save-projects', projects);
       render();
       await closeDropdown();
@@ -376,11 +388,13 @@
     // ========================================================================
     // ACTIONS
     // ========================================================================
-    
+
     async function openProject(index) {
       activeIndex = index;
       render();
-      await ipcRenderer.invoke('open-project', projects[index].name);
+      const p = projects[index];
+      // 用 path 打开项目（如果有），否则用 displayName 匹配窗口
+      await ipcRenderer.invoke('open-project', p.path || p.displayName);
     }
     
     async function removeProject(index) {

@@ -1,6 +1,7 @@
 /**
  * [INPUT]: electron - Electron 框架
  * [INPUT]: AppleScript - macOS 窗口控制，通过 System Events 检测/激活 Zed 窗口
+ * [INPUT]: Zed SQLite DB - 读取工作区路径信息
  * [OUTPUT]: 主进程，创建悬浮标签栏窗口，提供 IPC 接口
  * [POS]: 应用入口，管理窗口生命周期、IPC 通信、智能切换 Zed 窗口（已打开激活，未打开新建）
  *
@@ -9,7 +10,7 @@
 
 const { app, BrowserWindow, ipcMain, screen, globalShortcut } = require('electron');
 const path = require('path');
-const { exec } = require('child_process');
+const { exec, execSync } = require('child_process');
 const fs = require('fs');
 
 // ============================================================================
@@ -17,6 +18,7 @@ const fs = require('fs');
 // ============================================================================
 
 const CONFIG_PATH = path.join(app.getPath('userData'), 'projects.json');
+const ZED_DB_PATH = path.join(app.getPath('home'), 'Library/Application Support/Zed/db/0-stable/db.sqlite');
 const BAR_HEIGHT = 36;
 
 let mainWindow = null;
@@ -50,7 +52,37 @@ function createWindow() {
 function loadProjects() {
   try {
     if (fs.existsSync(CONFIG_PATH)) {
-      return JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf-8'));
+      let projects = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf-8'));
+
+      // 数据迁移：旧格式 { name } -> 新格式 { path, displayName }
+      let needsMigration = false;
+      const workspaces = getZedWorkspaces();
+
+      projects = projects.map(p => {
+        if (p.name && !p.path && !p.displayName) {
+          // 旧格式，需要迁移
+          needsMigration = true;
+          const projectPath = workspaces[p.name] || null;
+          return {
+            path: projectPath,
+            displayName: p.name,
+            color: p.color
+          };
+        }
+        // 已经是新格式或部分新格式
+        return {
+          path: p.path || null,
+          displayName: p.displayName || p.name,
+          color: p.color
+        };
+      });
+
+      if (needsMigration) {
+        saveProjects(projects);
+        console.log('Migrated projects to new format');
+      }
+
+      return projects;
     }
   } catch (e) {
     console.error('Failed to load projects:', e);
@@ -63,6 +95,31 @@ function saveProjects(projects) {
     fs.writeFileSync(CONFIG_PATH, JSON.stringify(projects, null, 2));
   } catch (e) {
     console.error('Failed to save projects:', e);
+  }
+}
+
+// ============================================================================
+// ZED DATABASE - 读取工作区路径
+// ============================================================================
+
+function getZedWorkspaces() {
+  // 从 Zed 数据库读取所有工作区路径，返回 { name -> path } 映射
+  try {
+    const result = execSync(`sqlite3 '${ZED_DB_PATH}' "SELECT paths FROM workspaces WHERE paths IS NOT NULL ORDER BY timestamp DESC;"`).toString();
+    const mapping = {};
+    result.trim().split('\n').forEach(p => {
+      if (p) {
+        const name = path.basename(p);
+        // 如果有同名项目，保留最近使用的（先出现的）
+        if (!mapping[name]) {
+          mapping[name] = p;
+        }
+      }
+    });
+    return mapping;
+  } catch (e) {
+    console.error('Failed to read Zed database:', e);
+    return {};
   }
 }
 
@@ -97,14 +154,38 @@ function getZedWindows() {
     end tell`;
     exec(`osascript -e '${script}'`, (err, stdout) => {
       if (err || !stdout.trim()) return resolve([]);
+
+      // 获取 Zed 数据库中的路径映射
+      const workspaces = getZedWorkspaces();
+
       let emptyCount = 0;
       const windows = stdout.trim().split(', ')
         .filter(name => name)
-        .map(name => {
-          if (name === 'empty project') return `empty project (${++emptyCount})`;
-          return name.includes(' — ') ? name.split(' — ')[0] : name;
+        .map(windowName => {
+          // empty project 需要编号区分
+          if (windowName === 'empty project') {
+            return {
+              windowName: `empty project (${++emptyCount})`,
+              path: null,
+              displayName: `empty project (${emptyCount})`
+            };
+          }
+
+          // 提取项目名（去掉 " — 文件名" 部分）
+          const projectName = windowName.includes(' — ')
+            ? windowName.split(' — ')[0]
+            : windowName;
+
+          // 从数据库查找对应路径
+          const projectPath = workspaces[projectName] || null;
+
+          return {
+            windowName,      // 完整窗口名（用于 AppleScript 匹配）
+            path: projectPath,  // 项目路径（唯一标识）
+            displayName: projectName  // 显示名（项目名）
+          };
         });
-      resolve([...new Set(windows)]);
+      resolve(windows);
     });
   });
 }
@@ -136,7 +217,7 @@ function activateZedWindowByName(windowName) {
   const script = `tell application "System Events"
     tell process "Zed"
       repeat with w in every window
-        if name of w is "${windowName}" or name of w starts with "${windowName} —" then
+        if name of w is "${windowName}" or name of w starts with "${windowName} — " then
           perform action "AXRaise" of w
           set frontmost to true
           return "activated"
@@ -158,8 +239,14 @@ ipcMain.handle('save-projects', (_, projects) => {
   return true;
 });
 
-ipcMain.handle('open-project', (_, windowName) => {
-  activateZedWindowByName(windowName);
+ipcMain.handle('open-project', (_, pathOrName) => {
+  // 如果是路径，先尝试用路径的 basename 匹配窗口
+  if (pathOrName && pathOrName.startsWith('/')) {
+    const projectName = path.basename(pathOrName);
+    activateZedWindowByName(projectName);
+  } else {
+    activateZedWindowByName(pathOrName);
+  }
   return true;
 });
 
@@ -221,8 +308,11 @@ app.whenReady().then(() => {
   for (let i = 1; i <= 9; i++) {
     globalShortcut.register(`CommandOrControl+Alt+${i}`, () => {
       const projects = loadProjects();
-      if (projects[i - 1]) {
-        activateZedWindowByName(projects[i - 1].name);
+      const p = projects[i - 1];
+      if (p) {
+        // 用 path 的 basename 或 displayName 匹配窗口
+        const name = p.path ? path.basename(p.path) : p.displayName;
+        activateZedWindowByName(name);
       }
     });
   }
