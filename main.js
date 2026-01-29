@@ -162,7 +162,8 @@ ipcMain.handle('select-folder', async () => {
 });
 
 ipcMain.handle('open-folder-in-zed', (_, folderPath) => {
-  exec(`zed "${folderPath}"`);
+  // 使用 open -a Zed，因为 zed CLI 可能不在 Electron 的 PATH 里
+  exec(`open -a Zed "${folderPath}"`);
   return path.basename(folderPath);
 });
 
