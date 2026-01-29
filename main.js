@@ -31,8 +31,9 @@ function getWindowConfig() {
   const { width } = screen.getPrimaryDisplay().workAreaSize;
   return {
     width, height: BAR_HEIGHT, x: 0, y: 0,
-    frame: false, transparent: true, alwaysOnTop: true,
+    frame: false, transparent: false, alwaysOnTop: true,
     resizable: false, skipTaskbar: true, hasShadow: false,
+    backgroundColor: '#1e1e1e',
     webPreferences: { nodeIntegration: true, contextIsolation: false },
   };
 }
@@ -258,7 +259,7 @@ ipcMain.handle('set-window-height', (_, height) => {
 ipcMain.handle('select-folder', async () => {
   const { dialog } = require('electron');
 
-  // 临时取消 alwaysOnTop，避免对话框被遮挡或卡顿
+  // 临时取消 alwaysOnTop，避免对话框卡顿
   if (mainWindow) {
     mainWindow.setAlwaysOnTop(false);
   }

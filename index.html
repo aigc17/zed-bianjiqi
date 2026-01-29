@@ -373,7 +373,11 @@
     }
 
     async function selectNewFolder() {
-      await closeDropdown();
+      // 直接关闭下拉菜单，不等待
+      document.getElementById('dropdown').classList.remove('show');
+      dropdownOpen = false;
+      ipcRenderer.invoke('set-window-height', 36); // 不 await
+
       const folderPath = await ipcRenderer.invoke('select-folder');
       if (folderPath) {
         const displayName = await ipcRenderer.invoke('open-folder-in-zed', folderPath);
@@ -454,7 +458,13 @@
         await closeDropdown();
       }
     });
-    
+
+    // 标签栏鼠标滚轮水平滚动
+    document.getElementById('tabs').addEventListener('wheel', (e) => {
+      e.preventDefault();
+      e.currentTarget.scrollLeft += e.deltaY;
+    });
+
     init();
   </script>
 </body>
