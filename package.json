@@ -1,0 +1,21 @@
+{
+  "name": "zed-workspace-manager",
+  "version": "1.0.0",
+  "description": "A workspace manager for Zed editor with project tabs",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "dev": "electron ."
+  },
+  "keywords": [
+    "zed",
+    "workspace",
+    "manager",
+    "tabs"
+  ],
+  "author": "",
+  "license": "MIT",
+  "devDependencies": {
+    "electron": "^40.1.0"
+  }
+}
