@@ -1,7 +1,8 @@
 /**
  * [INPUT]: electron - Electron 框架
- * [OUTPUT]: 主进程，创建悬浮标签栏窗口
- * [POS]: 应用入口，管理窗口生命周期和 IPC 通信
+ * [INPUT]: AppleScript - macOS 窗口控制，通过 System Events 检测/激活 Zed 窗口
+ * [OUTPUT]: 主进程，创建悬浮标签栏窗口，提供 IPC 接口
+ * [POS]: 应用入口，管理窗口生命周期、IPC 通信、智能切换 Zed 窗口（已打开激活，未打开新建）
  *
  * [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
  */
@@ -69,28 +70,35 @@ function saveProjects(projects) {
 // ZED CONTROL (AppleScript)
 // ============================================================================
 
-function activateZedWindow(projectPath) {
-  // 先尝试激活已有窗口，如果没有则打开新窗口
-  const script = `
-    tell application "System Events"
-      set zedRunning to (name of processes) contains "Zed"
-    end tell
-    
-    if zedRunning then
-      tell application "Zed" to activate
-    end if
-    
-    do shell script "zed -n '${projectPath.replace(/'/g, "'\\''")}';"
-  `;
-  
-  exec(`osascript -e '${script.replace(/'/g, "'\"'\"'")}'`, (err) => {
-    if (err) {
-      // fallback: 直接用 CLI
-      exec(`zed -n "${projectPath}"`, (err2) => {
-        if (err2) console.error('Failed to open Zed:', err2);
-      });
-    }
+function getZedWindows() {
+  return new Promise((resolve) => {
+    const script = `tell application "System Events"
+      if not (exists process "Zed") then return ""
+      tell process "Zed" to get name of every window
+    end tell`;
+    exec(`osascript -e '${script}'`, (err, stdout) => {
+      if (err || !stdout.trim()) return resolve([]);
+      const windows = stdout.trim().split(', ')
+        .filter(name => name && name !== 'empty project')
+        .map(name => name.includes(' — ') ? name.split(' — ')[0] : name);
+      resolve([...new Set(windows)]);
+    });
   });
+}
+
+function activateZedWindowByName(windowName) {
+  const script = `tell application "System Events"
+    tell process "Zed"
+      repeat with w in every window
+        if name of w is "${windowName}" or name of w starts with "${windowName} —" then
+          perform action "AXRaise" of w
+          set frontmost to true
+          return "activated"
+        end if
+      end repeat
+    end tell
+  end tell`;
+  exec(`osascript -e '${script}'`);
 }
 
 // ============================================================================
@@ -104,20 +112,15 @@ ipcMain.handle('save-projects', (_, projects) => {
   return true;
 });
 
-ipcMain.handle('open-project', (_, projectPath) => {
-  activateZedWindow(projectPath);
+ipcMain.handle('open-project', (_, windowName) => {
+  activateZedWindowByName(windowName);
   return true;
 });
 
-ipcMain.handle('select-folder', async () => {
-  const { dialog } = require('electron');
-  const result = await dialog.showOpenDialog(mainWindow, {
-    properties: ['openDirectory'],
-  });
-  if (!result.canceled && result.filePaths.length > 0) {
-    return result.filePaths[0];
-  }
-  return null;
+ipcMain.handle('get-zed-windows', () => getZedWindows());
+
+ipcMain.handle('set-window-height', (_, height) => {
+  if (mainWindow) mainWindow.setSize(mainWindow.getSize()[0], height);
 });
 
 // ============================================================================
@@ -127,12 +130,11 @@ ipcMain.handle('select-folder', async () => {
 app.whenReady().then(() => {
   createWindow();
   
-  // 注册全局快捷键 Cmd+1~9
   for (let i = 1; i <= 9; i++) {
     globalShortcut.register(`CommandOrControl+Alt+${i}`, () => {
       const projects = loadProjects();
       if (projects[i - 1]) {
-        activateZedWindow(projects[i - 1].path);
+        activateZedWindowByName(projects[i - 1].name);
       }
     });
   }

@@ -4,18 +4,13 @@
   <meta charset="UTF-8">
   <title>Zed Workspace Manager</title>
   <style>
-    * {
-      margin: 0;
-      padding: 0;
-      box-sizing: border-box;
-      user-select: none;
-    }
+    * { margin: 0; padding: 0; box-sizing: border-box; user-select: none; }
     
     body {
       font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Text', sans-serif;
       font-size: 12px;
       background: transparent;
-      overflow: hidden;
+      overflow: visible;
     }
     
     .tab-bar {
@@ -35,10 +30,7 @@
       overflow-x: auto;
       -webkit-app-region: no-drag;
     }
-    
-    .tabs::-webkit-scrollbar {
-      display: none;
-    }
+    .tabs::-webkit-scrollbar { display: none; }
     
     .tab {
       display: flex;
@@ -51,69 +43,60 @@
       cursor: pointer;
       transition: all 0.15s ease;
       white-space: nowrap;
-      position: relative;
     }
-    
-    .tab:hover {
-      background: rgba(255, 255, 255, 0.15);
-      color: #fff;
-    }
-    
-    .tab.active {
-      background: rgba(99, 102, 241, 0.6);
-      color: #fff;
-    }
-    
-    .tab .shortcut {
-      font-size: 10px;
-      opacity: 0.5;
-      margin-left: 4px;
-    }
-    
+    .tab:hover { background: rgba(255, 255, 255, 0.15); color: #fff; }
+    .tab.active { background: rgba(99, 102, 241, 0.6); color: #fff; }
+    .tab .shortcut { font-size: 10px; opacity: 0.5; margin-left: 4px; }
     .tab .close {
-      opacity: 0;
-      margin-left: 4px;
-      width: 14px;
-      height: 14px;
-      border-radius: 3px;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      transition: all 0.15s ease;
+      opacity: 0; margin-left: 4px; width: 14px; height: 14px;
+      border-radius: 3px; display: flex; align-items: center;
+      justify-content: center; transition: all 0.15s ease;
     }
-    
-    .tab:hover .close {
-      opacity: 0.6;
-    }
-    
-    .tab .close:hover {
-      opacity: 1;
-      background: rgba(255, 255, 255, 0.2);
-    }
+    .tab:hover .close { opacity: 0.6; }
+    .tab .close:hover { opacity: 1; background: rgba(255, 255, 255, 0.2); }
     
     .add-btn {
-      width: 28px;
-      height: 28px;
-      display: flex;
-      align-items: center;
-      justify-content: center;
+      width: 28px; height: 28px;
+      display: flex; align-items: center; justify-content: center;
       background: rgba(255, 255, 255, 0.08);
-      border-radius: 6px;
-      color: rgba(255, 255, 255, 0.5);
+      border-radius: 6px; color: rgba(255, 255, 255, 0.5);
+      cursor: pointer; transition: all 0.15s ease;
+      -webkit-app-region: no-drag; margin-left: 8px;
+      position: relative;
+    }
+    .add-btn:hover { background: rgba(255, 255, 255, 0.15); color: #fff; }
+    
+    .dropdown {
+      position: fixed;
+      top: 40px; right: 8px;
+      background: #2d2d2d;
+      border: 1px solid rgba(255, 255, 255, 0.15);
+      border-radius: 8px;
+      min-width: 240px;
+      max-height: 400px;
+      overflow-y: auto;
+      box-shadow: 0 8px 24px rgba(0,0,0,0.4);
+      z-index: 1000;
+      display: none;
+    }
+    .dropdown.show { display: block; }
+    .dropdown-item {
+      padding: 12px 16px;
+      color: rgba(255, 255, 255, 0.9);
       cursor: pointer;
-      transition: all 0.15s ease;
-      -webkit-app-region: no-drag;
-      margin-left: 8px;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+      font-size: 13px;
+    }
+    .dropdown-item:hover { background: rgba(99, 102, 241, 0.3); }
+    .dropdown-item:last-child { border-bottom: none; }
+    .dropdown-empty {
+      padding: 16px;
+      color: rgba(255, 255, 255, 0.4);
+      text-align: center;
+      font-size: 13px;
     }
     
-    .add-btn:hover {
-      background: rgba(255, 255, 255, 0.15);
-      color: #fff;
-    }
-    
-    .drag-over {
-      background: rgba(99, 102, 241, 0.3) !important;
-    }
+    .drag-over { background: rgba(99, 102, 241, 0.3) !important; }
   </style>
 </head>
 <body>
@@ -121,6 +104,7 @@
     <div class="tabs" id="tabs"></div>
     <div class="add-btn" id="addBtn" title="添加项目">+</div>
   </div>
+  <div class="dropdown" id="dropdown"></div>
 
   <script>
     const { ipcRenderer } = require('electron');
@@ -128,6 +112,7 @@
     let projects = [];
     let activeIndex = -1;
     let draggedIndex = null;
+    let dropdownOpen = false;
     
     // ========================================================================
     // RENDER
@@ -136,57 +121,77 @@
     function render() {
       const container = document.getElementById('tabs');
       container.innerHTML = projects.map((p, i) => `
-        <div class="tab ${i === activeIndex ? 'active' : ''}" 
-             data-index="${i}"
-             draggable="true">
+        <div class="tab ${i === activeIndex ? 'active' : ''}" data-index="${i}" draggable="true">
           <span class="name">${p.name}</span>
           ${i < 9 ? `<span class="shortcut">⌥${i + 1}</span>` : ''}
           <span class="close" data-action="remove">×</span>
         </div>
       `).join('');
       
-      // 绑定事件
       container.querySelectorAll('.tab').forEach(tab => {
         const index = parseInt(tab.dataset.index);
-        
         tab.addEventListener('click', (e) => {
-          if (e.target.dataset.action === 'remove') {
-            removeProject(index);
-          } else {
-            openProject(index);
-          }
+          if (e.target.dataset.action === 'remove') removeProject(index);
+          else openProject(index);
         });
-        
-        // 拖拽排序
-        tab.addEventListener('dragstart', () => {
-          draggedIndex = index;
-          tab.style.opacity = '0.5';
-        });
-        
+        tab.addEventListener('dragstart', () => { draggedIndex = index; tab.style.opacity = '0.5'; });
         tab.addEventListener('dragend', () => {
-          tab.style.opacity = '1';
-          draggedIndex = null;
+          tab.style.opacity = '1'; draggedIndex = null;
           document.querySelectorAll('.tab').forEach(t => t.classList.remove('drag-over'));
         });
-        
         tab.addEventListener('dragover', (e) => {
           e.preventDefault();
-          if (draggedIndex !== null && draggedIndex !== index) {
-            tab.classList.add('drag-over');
-          }
+          if (draggedIndex !== null && draggedIndex !== index) tab.classList.add('drag-over');
         });
-        
-        tab.addEventListener('dragleave', () => {
-          tab.classList.remove('drag-over');
-        });
-        
+        tab.addEventListener('dragleave', () => tab.classList.remove('drag-over'));
         tab.addEventListener('drop', (e) => {
           e.preventDefault();
-          if (draggedIndex !== null && draggedIndex !== index) {
-            reorderProjects(draggedIndex, index);
-          }
+          if (draggedIndex !== null && draggedIndex !== index) reorderProjects(draggedIndex, index);
         });
       });
+    }
+    
+    // ========================================================================
+    // DROPDOWN - 从已打开的 Zed 窗口选择
+    // ========================================================================
+    
+    async function toggleDropdown() {
+      const dropdown = document.getElementById('dropdown');
+      if (dropdownOpen) {
+        dropdown.classList.remove('show');
+        dropdownOpen = false;
+        await ipcRenderer.invoke('set-window-height', 36);
+        return;
+      }
+      
+      const windows = await ipcRenderer.invoke('get-zed-windows');
+      const existingNames = projects.map(p => p.name);
+      const available = windows.filter(w => !existingNames.includes(w));
+      
+      if (available.length === 0) {
+        dropdown.innerHTML = '<div class="dropdown-empty">没有可添加的 Zed 窗口</div>';
+      } else {
+        dropdown.innerHTML = available.map(name => 
+          `<div class="dropdown-item" data-name="${name}">${name}</div>`
+        ).join('');
+        dropdown.querySelectorAll('.dropdown-item').forEach(item => {
+          item.addEventListener('click', () => addFromDropdown(item.dataset.name));
+        });
+      }
+      
+      dropdown.classList.add('show');
+      dropdownOpen = true;
+      const dropdownHeight = Math.min(available.length * 42 + 50, 400);
+      await ipcRenderer.invoke('set-window-height', 36 + dropdownHeight);
+    }
+    
+    async function addFromDropdown(name) {
+      projects.push({ name });
+      await ipcRenderer.invoke('save-projects', projects);
+      render();
+      document.getElementById('dropdown').classList.remove('show');
+      dropdownOpen = false;
+      await ipcRenderer.invoke('set-window-height', 36);
     }
     
     // ========================================================================
@@ -196,24 +201,12 @@
     async function openProject(index) {
       activeIndex = index;
       render();
-      await ipcRenderer.invoke('open-project', projects[index].path);
-    }
-    
-    async function addProject() {
-      const folderPath = await ipcRenderer.invoke('select-folder');
-      if (folderPath) {
-        const name = folderPath.split('/').pop();
-        projects.push({ name, path: folderPath });
-        await ipcRenderer.invoke('save-projects', projects);
-        render();
-      }
+      await ipcRenderer.invoke('open-project', projects[index].name);
     }
     
     async function removeProject(index) {
       projects.splice(index, 1);
-      if (activeIndex >= projects.length) {
-        activeIndex = projects.length - 1;
-      }
+      if (activeIndex >= projects.length) activeIndex = projects.length - 1;
       await ipcRenderer.invoke('save-projects', projects);
       render();
     }
@@ -221,13 +214,9 @@
     async function reorderProjects(from, to) {
       const [item] = projects.splice(from, 1);
       projects.splice(to, 0, item);
-      if (activeIndex === from) {
-        activeIndex = to;
-      } else if (from < activeIndex && to >= activeIndex) {
-        activeIndex--;
-      } else if (from > activeIndex && to <= activeIndex) {
-        activeIndex++;
-      }
+      if (activeIndex === from) activeIndex = to;
+      else if (from < activeIndex && to >= activeIndex) activeIndex--;
+      else if (from > activeIndex && to <= activeIndex) activeIndex++;
       await ipcRenderer.invoke('save-projects', projects);
       render();
     }
@@ -241,7 +230,14 @@
       render();
     }
     
-    document.getElementById('addBtn').addEventListener('click', addProject);
+    document.getElementById('addBtn').addEventListener('click', toggleDropdown);
+    document.addEventListener('click', async (e) => {
+      if (dropdownOpen && !e.target.closest('.add-btn') && !e.target.closest('.dropdown')) {
+        document.getElementById('dropdown').classList.remove('show');
+        dropdownOpen = false;
+        await ipcRenderer.invoke('set-window-height', 36);
+      }
+    });
     
     init();
   </script>
