@@ -70,6 +70,25 @@ function saveProjects(projects) {
 // ZED CONTROL (AppleScript)
 // ============================================================================
 
+function adjustZedWindows() {
+  // 获取工作区信息（workArea.y 是菜单栏高度）
+  const display = screen.getPrimaryDisplay();
+  const menuBarHeight = display.workArea.y;
+  const { width, height } = display.workAreaSize;
+  const topOffset = menuBarHeight + BAR_HEIGHT;
+
+  const script = `tell application "System Events"
+    if not (exists process "Zed") then return
+    tell process "Zed"
+      repeat with w in every window
+        set position of w to {0, ${topOffset}}
+        set size of w to {${width}, ${height - BAR_HEIGHT}}
+      end repeat
+    end tell
+  end tell`;
+  exec(`osascript -e '${script}'`);
+}
+
 function getZedWindows() {
   return new Promise((resolve) => {
     const script = `tell application "System Events"
@@ -172,22 +191,27 @@ ipcMain.handle('open-folder-in-zed', (_, folderPath) => {
 // ============================================================================
 
 function startHideCheck() {
-  // 监听系统活动应用变化
-  const { systemPreferences } = require('electron');
-  
-  // 使用 NSWorkspace 通知监听应用切换（更轻量）
+  let lastFrontApp = '';
+
   setInterval(() => {
     exec(`osascript -e 'tell application "System Events" to get name of first process whose frontmost is true' 2>/dev/null`, (err, stdout) => {
       if (err || !mainWindow) return;
       const frontApp = stdout.trim().toLowerCase();
       const shouldShow = frontApp === 'zed' || frontApp === 'electron';
+
       if (shouldShow && !mainWindow.isVisible()) {
-        mainWindow.showInactive(); // 不抢焦点
+        mainWindow.showInactive();
       } else if (!shouldShow && mainWindow.isVisible()) {
         mainWindow.hide();
       }
+
+      // Zed 刚激活时，调整窗口位置到标签栏下方
+      if (frontApp === 'zed' && lastFrontApp !== 'zed') {
+        adjustZedWindows();
+      }
+      lastFrontApp = frontApp;
     });
-  }, 1000); // 降低频率到 1 秒
+  }, 1000);
 }
 
 app.whenReady().then(() => {
