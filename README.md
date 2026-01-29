@@ -11,6 +11,12 @@ macOS 专用的 Zed 编辑器多项目标签栏管理工具。
 - **智能显示** - 仅在 Zed 激活时显示，其他应用自动隐藏
 - **文件夹新建** - 从下拉菜单选择文件夹，自动用 Zed 打开
 
+## 系统要求
+
+- macOS（使用 AppleScript 控制窗口）
+- Node.js 18+
+- Zed 编辑器已安装
+
 ## 安装
 
 ```bash
@@ -25,11 +31,47 @@ npm install
 npm start
 ```
 
-## 系统要求
+## 开机自启（可选）
 
-- macOS（使用 AppleScript 控制窗口）
-- Node.js 18+
-- Zed 编辑器已安装
+### 方法一：LaunchAgent（推荐）
+
+```bash
+# 创建启动配置（注意修改路径）
+cat > ~/Library/LaunchAgents/com.zed.workspace-manager.plist << 'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.zed.workspace-manager</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/local/bin/npm</string>
+        <string>start</string>
+    </array>
+    <key>WorkingDirectory</key>
+    <string>/Users/你的用户名/zed-bianjiqi</string>
+    <key>RunAtLoad</key>
+    <true/>
+</dict>
+</plist>
+EOF
+
+# 加载启动项
+launchctl load ~/Library/LaunchAgents/com.zed.workspace-manager.plist
+
+# 卸载启动项（如需关闭自启）
+# launchctl unload ~/Library/LaunchAgents/com.zed.workspace-manager.plist
+```
+
+### 方法二：登录项
+
+1. 创建启动脚本 `start.command`：
+   ```bash
+   cd /path/to/zed-bianjiqi && npm start
+   ```
+2. 给脚本执行权限：`chmod +x start.command`
+3. 系统偏好设置 → 用户与群组 → 登录项 → 添加该脚本
 
 ## 使用
 
