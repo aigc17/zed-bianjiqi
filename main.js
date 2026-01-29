@@ -434,7 +434,7 @@ function startHideCheck() {
     console.log('[hideCheck] 执行 osascript', Date.now());
     exec(`osascript -e 'tell application "System Events" to get name of first process whose frontmost is true' 2>/dev/null`, (err, stdout) => {
       console.log('[hideCheck] osascript 返回', Date.now());
-      if (err || !mainWindow) return;
+      if (err || !mainWindow || mainWindow.isDestroyed()) return;
       const frontApp = stdout.trim().toLowerCase();
       const shouldShow = frontApp === 'zed' || frontApp === 'electron';
 
