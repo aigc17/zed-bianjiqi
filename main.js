@@ -147,7 +147,8 @@ function isSlowDialogPath(folderPath) {
 
 function resolveDialogDefaultPath() {
   const lastFolderPath = dialogState.lastFolderPath;
-  if (lastFolderPath && fs.existsSync(lastFolderPath) && !isSlowDialogPath(lastFolderPath)) {
+  // 先检查是否慢路径，避免 fs.existsSync 在网络/云盘路径上阻塞
+  if (lastFolderPath && !isSlowDialogPath(lastFolderPath) && fs.existsSync(lastFolderPath)) {
     return lastFolderPath;
   }
 
