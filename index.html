@@ -112,6 +112,65 @@
     }
     
     .drag-over { background: rgba(99, 102, 241, 0.3) !important; }
+    
+    /* 右键菜单 */
+    .context-menu {
+      position: fixed;
+      background: #2d2d2d;
+      border: 1px solid rgba(255, 255, 255, 0.15);
+      border-radius: 8px;
+      min-width: 160px;
+      box-shadow: 0 8px 24px rgba(0,0,0,0.4);
+      z-index: 2000;
+      display: none;
+      padding: 4px 0;
+    }
+    .context-menu.show { display: block; }
+    .context-menu-item {
+      padding: 8px 14px;
+      color: rgba(255, 255, 255, 0.9);
+      cursor: pointer;
+      font-size: 13px;
+    }
+    .context-menu-item:hover { background: rgba(99, 102, 241, 0.3); }
+    .context-menu-divider {
+      height: 1px;
+      background: rgba(255, 255, 255, 0.1);
+      margin: 4px 0;
+    }
+    .color-picker {
+      display: flex;
+      gap: 6px;
+      padding: 8px 14px;
+    }
+    .color-dot {
+      width: 18px; height: 18px;
+      border-radius: 50%;
+      cursor: pointer;
+      border: 2px solid transparent;
+      transition: transform 0.1s;
+    }
+    .color-dot:hover { transform: scale(1.2); }
+    .color-dot.selected { border-color: #fff; }
+    
+    /* 重命名输入框 */
+    .rename-input {
+      background: #3d3d3d;
+      border: 1px solid rgba(99, 102, 241, 0.6);
+      border-radius: 4px;
+      color: #fff;
+      padding: 4px 8px;
+      font-size: 12px;
+      outline: none;
+      width: 100%;
+    }
+    
+    /* 标签颜色指示器 */
+    .tab .color-indicator {
+      width: 8px; height: 8px;
+      border-radius: 50%;
+      flex-shrink: 0;
+    }
   </style>
 </head>
 <body>
@@ -120,14 +179,18 @@
     <div class="add-btn" id="addBtn" title="添加项目">+</div>
   </div>
   <div class="dropdown" id="dropdown"></div>
+  <div class="context-menu" id="contextMenu"></div>
 
   <script>
     const { ipcRenderer } = require('electron');
+    
+    const COLORS = ['#e91e63', '#00bfa5', '#c6a700', '#2196f3', '#9c27b0', '#00bcd4'];
     
     let projects = [];
     let activeIndex = -1;
     let draggedIndex = null;
     let dropdownOpen = false;
+    let contextMenuIndex = -1;
     
     // ========================================================================
     // RENDER
@@ -136,8 +199,10 @@
     function render() {
       const container = document.getElementById('tabs');
       container.innerHTML = projects.map((p, i) => `
-        <div class="tab ${i === activeIndex ? 'active' : ''}" data-index="${i}" draggable="true">
-          <span class="name">${p.name}</span>
+        <div class="tab ${i === activeIndex ? 'active' : ''}" data-index="${i}" draggable="true"
+             style="${p.color ? `border-left: 3px solid ${p.color}` : ''}">
+          ${p.color ? `<span class="color-indicator" style="background:${p.color}"></span>` : ''}
+          <span class="name">${p.displayName || p.name}</span>
           ${i < 9 ? `<span class="shortcut">⌥${i + 1}</span>` : ''}
           <span class="close" data-action="remove">×</span>
         </div>
@@ -148,6 +213,10 @@
         tab.addEventListener('click', (e) => {
           if (e.target.dataset.action === 'remove') removeProject(index);
           else openProject(index);
+        });
+        tab.addEventListener('contextmenu', (e) => {
+          e.preventDefault();
+          showContextMenu(e, index);
         });
         tab.addEventListener('dragstart', () => { draggedIndex = index; tab.style.opacity = '0.5'; });
         tab.addEventListener('dragend', () => {
@@ -163,6 +232,79 @@
           e.preventDefault();
           if (draggedIndex !== null && draggedIndex !== index) reorderProjects(draggedIndex, index);
         });
+      });
+    }
+    
+    // ========================================================================
+    // CONTEXT MENU - 右键菜单
+    // ========================================================================
+    
+    async function showContextMenu(e, index) {
+      contextMenuIndex = index;
+      const menu = document.getElementById('contextMenu');
+      const p = projects[index];
+      
+      menu.innerHTML = `
+        <div class="context-menu-item" data-action="rename">重命名</div>
+        <div class="context-menu-divider"></div>
+        <div class="color-picker">
+          ${COLORS.map(c => `<div class="color-dot ${p.color === c ? 'selected' : ''}" data-color="${c}" style="background:${c}"></div>`).join('')}
+          <div class="color-dot ${!p.color ? 'selected' : ''}" data-color="" style="background:#666" title="无颜色"></div>
+        </div>
+        <div class="context-menu-divider"></div>
+        <div class="context-menu-item" data-action="remove">关闭标签</div>
+      `;
+      
+      menu.style.left = e.clientX + 'px';
+      menu.style.top = e.clientY + 'px';
+      menu.classList.add('show');
+      
+      await ipcRenderer.invoke('set-window-height', 200);
+      
+      menu.querySelector('[data-action="rename"]').addEventListener('click', () => startRename(index));
+      menu.querySelector('[data-action="remove"]').addEventListener('click', () => { hideContextMenu(); removeProject(index); });
+      menu.querySelectorAll('.color-dot').forEach(dot => {
+        dot.addEventListener('click', () => setColor(index, dot.dataset.color));
+      });
+    }
+    
+    async function hideContextMenu() {
+      document.getElementById('contextMenu').classList.remove('show');
+      contextMenuIndex = -1;
+      await ipcRenderer.invoke('set-window-height', 36);
+    }
+    
+    async function setColor(index, color) {
+      projects[index].color = color || undefined;
+      await ipcRenderer.invoke('save-projects', projects);
+      render();
+      hideContextMenu();
+    }
+    
+    function startRename(index) {
+      hideContextMenu();
+      const tab = document.querySelector(`.tab[data-index="${index}"]`);
+      const nameSpan = tab.querySelector('.name');
+      const currentName = projects[index].displayName || projects[index].name;
+      
+      nameSpan.innerHTML = `<input class="rename-input" value="${currentName}" />`;
+      const input = nameSpan.querySelector('input');
+      input.focus();
+      input.select();
+      
+      const finishRename = async () => {
+        const newName = input.value.trim();
+        if (newName && newName !== currentName) {
+          projects[index].displayName = newName;
+          await ipcRenderer.invoke('save-projects', projects);
+        }
+        render();
+      };
+      
+      input.addEventListener('blur', finishRename);
+      input.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') finishRename();
+        if (e.key === 'Escape') render();
       });
     }
     
@@ -269,10 +411,13 @@
     
     document.getElementById('addBtn').addEventListener('click', toggleDropdown);
     document.addEventListener('click', async (e) => {
+      // 关闭右键菜单
+      if (contextMenuIndex !== -1 && !e.target.closest('.context-menu')) {
+        hideContextMenu();
+      }
+      // 关闭下拉菜单
       if (dropdownOpen && !e.target.closest('.add-btn') && !e.target.closest('.dropdown')) {
-        document.getElementById('dropdown').classList.remove('show');
-        dropdownOpen = false;
-        await ipcRenderer.invoke('set-window-height', 36);
+        await closeDropdown();
       }
     });
     
