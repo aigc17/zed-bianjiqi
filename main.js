@@ -78,15 +78,42 @@ function getZedWindows() {
     end tell`;
     exec(`osascript -e '${script}'`, (err, stdout) => {
       if (err || !stdout.trim()) return resolve([]);
+      let emptyCount = 0;
       const windows = stdout.trim().split(', ')
-        .filter(name => name && name !== 'empty project')
-        .map(name => name.includes(' — ') ? name.split(' — ')[0] : name);
+        .filter(name => name)
+        .map(name => {
+          if (name === 'empty project') return `empty project (${++emptyCount})`;
+          return name.includes(' — ') ? name.split(' — ')[0] : name;
+        });
       resolve([...new Set(windows)]);
     });
   });
 }
 
 function activateZedWindowByName(windowName) {
+  // 处理 empty project (N) 格式
+  const match = windowName.match(/^empty project \((\d+)\)$/);
+  if (match) {
+    const index = parseInt(match[1]);
+    const script = `tell application "System Events"
+      tell process "Zed"
+        set emptyCount to 0
+        repeat with w in every window
+          if name of w is "empty project" then
+            set emptyCount to emptyCount + 1
+            if emptyCount is ${index} then
+              perform action "AXRaise" of w
+              set frontmost to true
+              return "activated"
+            end if
+          end if
+        end repeat
+      end tell
+    end tell`;
+    exec(`osascript -e '${script}'`);
+    return;
+  }
+  
   const script = `tell application "System Events"
     tell process "Zed"
       repeat with w in every window
@@ -123,12 +150,48 @@ ipcMain.handle('set-window-height', (_, height) => {
   if (mainWindow) mainWindow.setSize(mainWindow.getSize()[0], height);
 });
 
+ipcMain.handle('select-folder', async () => {
+  const { dialog } = require('electron');
+  const result = await dialog.showOpenDialog(mainWindow, {
+    properties: ['openDirectory'],
+  });
+  if (!result.canceled && result.filePaths.length > 0) {
+    return result.filePaths[0];
+  }
+  return null;
+});
+
+ipcMain.handle('open-folder-in-zed', (_, folderPath) => {
+  exec(`zed "${folderPath}"`);
+  return path.basename(folderPath);
+});
+
 // ============================================================================
 // APP LIFECYCLE
 // ============================================================================
 
+function startHideCheck() {
+  // 监听系统活动应用变化
+  const { systemPreferences } = require('electron');
+  
+  // 使用 NSWorkspace 通知监听应用切换（更轻量）
+  setInterval(() => {
+    exec(`osascript -e 'tell application "System Events" to get name of first process whose frontmost is true' 2>/dev/null`, (err, stdout) => {
+      if (err || !mainWindow) return;
+      const frontApp = stdout.trim().toLowerCase();
+      const shouldShow = frontApp === 'zed' || frontApp === 'electron';
+      if (shouldShow && !mainWindow.isVisible()) {
+        mainWindow.showInactive(); // 不抢焦点
+      } else if (!shouldShow && mainWindow.isVisible()) {
+        mainWindow.hide();
+      }
+    });
+  }, 1000); // 降低频率到 1 秒
+}
+
 app.whenReady().then(() => {
   createWindow();
+  startHideCheck();
   
   for (let i = 1; i <= 9; i++) {
     globalShortcut.register(`CommandOrControl+Alt+${i}`, () => {

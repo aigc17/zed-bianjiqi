@@ -89,6 +89,21 @@
     }
     .dropdown-item:hover { background: rgba(99, 102, 241, 0.3); }
     .dropdown-item:last-child { border-bottom: none; }
+    .dropdown-item.new-folder {
+      color: rgba(99, 102, 241, 1);
+      font-weight: 500;
+    }
+    .dropdown-divider {
+      height: 1px;
+      background: rgba(255, 255, 255, 0.15);
+      margin: 4px 0;
+    }
+    .dropdown-label {
+      padding: 8px 16px 4px;
+      color: rgba(255, 255, 255, 0.4);
+      font-size: 11px;
+      text-transform: uppercase;
+    }
     .dropdown-empty {
       padding: 16px;
       color: rgba(255, 255, 255, 0.4);
@@ -168,30 +183,52 @@
       const existingNames = projects.map(p => p.name);
       const available = windows.filter(w => !existingNames.includes(w));
       
-      if (available.length === 0) {
-        dropdown.innerHTML = '<div class="dropdown-empty">没有可添加的 Zed 窗口</div>';
-      } else {
-        dropdown.innerHTML = available.map(name => 
+      let html = '<div class="dropdown-item new-folder" data-action="new-folder">📂 选择文件夹新建...</div>';
+      
+      if (available.length > 0) {
+        html += '<div class="dropdown-divider"></div>';
+        html += '<div class="dropdown-label">已打开的窗口</div>';
+        html += available.map(name => 
           `<div class="dropdown-item" data-name="${name}">${name}</div>`
         ).join('');
-        dropdown.querySelectorAll('.dropdown-item').forEach(item => {
-          item.addEventListener('click', () => addFromDropdown(item.dataset.name));
-        });
       }
+      
+      dropdown.innerHTML = html;
+      
+      dropdown.querySelector('[data-action="new-folder"]').addEventListener('click', selectNewFolder);
+      dropdown.querySelectorAll('.dropdown-item[data-name]').forEach(item => {
+        item.addEventListener('click', () => addFromDropdown(item.dataset.name));
+      });
       
       dropdown.classList.add('show');
       dropdownOpen = true;
-      const dropdownHeight = Math.min(available.length * 42 + 50, 400);
+      const itemCount = available.length + 1;
+      const dropdownHeight = Math.min(itemCount * 42 + 60, 400);
       await ipcRenderer.invoke('set-window-height', 36 + dropdownHeight);
+    }
+    
+    async function selectNewFolder() {
+      await closeDropdown();
+      const folderPath = await ipcRenderer.invoke('select-folder');
+      if (folderPath) {
+        const name = await ipcRenderer.invoke('open-folder-in-zed', folderPath);
+        projects.push({ name });
+        await ipcRenderer.invoke('save-projects', projects);
+        render();
+      }
+    }
+    
+    async function closeDropdown() {
+      document.getElementById('dropdown').classList.remove('show');
+      dropdownOpen = false;
+      await ipcRenderer.invoke('set-window-height', 36);
     }
     
     async function addFromDropdown(name) {
       projects.push({ name });
       await ipcRenderer.invoke('save-projects', projects);
       render();
-      document.getElementById('dropdown').classList.remove('show');
-      dropdownOpen = false;
-      await ipcRenderer.invoke('set-window-height', 36);
+      await closeDropdown();
     }
     
     // ========================================================================
