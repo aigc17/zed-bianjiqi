@@ -429,17 +429,17 @@ ipcMain.handle('open-folder-in-zed', (_, folderPath) => {
 
 function startHideCheck() {
   let lastFrontApp = '';
+  let isChecking = false;
 
   setInterval(() => {
-    if (isSystemDialogOpen) {
-      console.log('[hideCheck] 跳过 - 对话框打开中');
-      return;
-    }
-    console.log('[hideCheck] 执行 osascript', Date.now());
+    if (isSystemDialogOpen || isChecking) return;
+
+    isChecking = true;
     exec(`osascript -e 'tell application "System Events" to get name of first process whose frontmost is true' 2>/dev/null`, (err, stdout) => {
-      console.log('[hideCheck] osascript 返回', Date.now());
+      isChecking = false;
       const win = mainWindow;
       if (err || !win || win.isDestroyed()) return;
+
       const frontApp = stdout.trim().toLowerCase();
       const shouldShow = frontApp === 'zed' || frontApp === 'electron';
 
@@ -450,11 +450,9 @@ function startHideCheck() {
           win.hide();
         }
       } catch (e) {
-        // 窗口可能在操作过程中被销毁
         return;
       }
 
-      // Zed 刚激活时，调整窗口位置到标签栏下方
       if (frontApp === 'zed' && lastFrontApp !== 'zed') {
         adjustZedWindows();
       }
