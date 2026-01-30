@@ -515,13 +515,19 @@ app.whenReady().then(() => {
   createWindow();
   dialogState = loadDialogState();
   startHideCheck();
-  
+
+  // 调试快捷键：Cmd+Shift+D 打开 DevTools
+  globalShortcut.register('CommandOrControl+Shift+D', () => {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.openDevTools({ mode: 'detach' });
+    }
+  });
+
   for (let i = 1; i <= 9; i++) {
     globalShortcut.register(`CommandOrControl+Alt+${i}`, async () => {
       const projects = await loadProjects();
       const p = projects[i - 1];
       if (p) {
-        // 用 path 的 basename 或 displayName 匹配窗口
         const name = p.path ? path.basename(p.path) : p.displayName;
         activateZedWindowByName(name);
       }
