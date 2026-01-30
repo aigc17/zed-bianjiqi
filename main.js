@@ -106,6 +106,8 @@ function createWindow() {
   mainWindow.loadFile('index.html');
   mainWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
   mainWindow.setIgnoreMouseEvents(false);
+  // 设置更高的窗口层级，确保在其他 alwaysOnTop 窗口之上
+  mainWindow.setAlwaysOnTop(true, 'floating', 1);
 }
 
 // ============================================================================
@@ -487,8 +489,8 @@ function startHideCheck() {
       try {
         if (shouldShow && !win.isVisible()) {
           win.showInactive();
-          // 重新设置关键属性，防止隐藏后丢失
-          win.setAlwaysOnTop(true);
+          // 设置更高的窗口层级
+          win.setAlwaysOnTop(true, 'floating', 1);
           win.setIgnoreMouseEvents(false);
         } else if (!shouldShow && win.isVisible()) {
           win.hide();
