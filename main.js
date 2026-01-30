@@ -417,22 +417,18 @@ ipcMain.handle('select-folder', async (event) => {
   const targetWindow = (event && BrowserWindow.fromWebContents(event.sender)) || mainWindow;
   const previousAlwaysOnTop = targetWindow ? targetWindow.isAlwaysOnTop() : false;
 
-  console.log(`[select-folder] 开始 resolveDialogDefaultPath t=${Date.now() - t0}ms`);
   const defaultPath = resolveDialogDefaultPath();
-  console.log(`[select-folder] resolveDialogDefaultPath 完成 t=${Date.now() - t0}ms, path=${defaultPath}`);
+  console.log(`[select-folder] defaultPath=${defaultPath}`);
 
-  // 暂停隐藏检查，避免焦点干扰
   isSystemDialogOpen = true;
 
   if (targetWindow) {
-    console.log(`[select-folder] 开始窗口操作 t=${Date.now() - t0}ms`);
     targetWindow.setAlwaysOnTop(false);
     targetWindow.show();
     targetWindow.focus();
     if (process.platform === 'darwin') {
       app.focus({ steal: true });
     }
-    console.log(`[select-folder] 窗口操作完成 t=${Date.now() - t0}ms`);
   }
 
   const dialogOptions = {
@@ -441,25 +437,23 @@ ipcMain.handle('select-folder', async (event) => {
     dontAddToRecent: true,
   };
 
-  console.log(`[select-folder] ★ 准备调用 showOpenDialog t=${Date.now() - t0}ms`);
   try {
     const result = targetWindow
       ? await dialog.showOpenDialog(targetWindow, dialogOptions)
       : await dialog.showOpenDialog(dialogOptions);
 
-    console.log(`[select-folder] ★ showOpenDialog 返回 t=${Date.now() - t0}ms, canceled=${result.canceled}`);
+    console.log(`[select-folder] 返回 canceled=${result.canceled}`);
 
     if (!result.canceled && result.filePaths.length > 0) {
       const selectedPath = result.filePaths[0];
       dialogState = { ...dialogState, lastFolderPath: selectedPath };
       saveDialogState(dialogState);
-      console.log(`[select-folder] ◀ 返回路径 t=${Date.now() - t0}ms`);
       return selectedPath;
     }
-    console.log(`[select-folder] ◀ 用户取消 t=${Date.now() - t0}ms`);
     return null;
   } finally {
-    if (targetWindow) {
+    console.log(`[select-folder] finally 执行`);
+    if (targetWindow && !targetWindow.isDestroyed()) {
       targetWindow.setAlwaysOnTop(previousAlwaysOnTop);
     }
     isSystemDialogOpen = false;
