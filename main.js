@@ -493,6 +493,9 @@ function startHideCheck() {
       try {
         if (shouldShow && !win.isVisible()) {
           win.showInactive();
+          // 重新设置关键属性，防止隐藏后丢失
+          win.setAlwaysOnTop(true);
+          win.setIgnoreMouseEvents(false);
         } else if (!shouldShow && win.isVisible()) {
           win.hide();
         }
