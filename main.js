@@ -11,7 +11,7 @@
 
 const { app, BrowserWindow, ipcMain, screen, globalShortcut } = require('electron');
 const path = require('path');
-const { exec } = require('child_process');
+const { exec, spawn } = require('child_process');
 const fs = require('fs');
 
 // ============================================================================
@@ -23,13 +23,68 @@ const DIALOG_STATE_PATH = path.join(app.getPath('userData'), 'dialog_state.json'
 const ZED_DB_PATH = path.join(app.getPath('home'), 'Library/Application Support/Zed/db/0-stable/db.sqlite');
 const BAR_HEIGHT = 36;
 const ZED_WORKSPACE_CACHE_TTL_MS = 60 * 1000;
-const DIALOG_SLOW_THRESHOLD_MS = 2000;
+const OSASCRIPT_TIMEOUT_MS = 3000;
 
 let mainWindow = null;
 let isSystemDialogOpen = false;
 let dialogState = { lastFolderPath: null };
 let zedWorkspaceCache = { mapping: {}, lastUpdated: 0 };
 let zedWorkspaceRefreshPromise = null;
+
+// ============================================================================
+// APPLESCRIPT EXECUTOR - 统一执行器，防止进程堆积
+// ============================================================================
+
+const scriptQueue = [];
+let isScriptRunning = false;
+
+function runAppleScript(script, callback) {
+  scriptQueue.push({ script, callback });
+  processScriptQueue();
+}
+
+function processScriptQueue() {
+  if (isScriptRunning || scriptQueue.length === 0) return;
+
+  isScriptRunning = true;
+  const { script, callback } = scriptQueue.shift();
+
+  const child = spawn('osascript', ['-e', script]);
+  let stdout = '';
+  let stderr = '';
+  let killed = false;
+
+  const timeout = setTimeout(() => {
+    killed = true;
+    child.kill('SIGKILL');
+  }, OSASCRIPT_TIMEOUT_MS);
+
+  child.stdout.on('data', (data) => { stdout += data; });
+  child.stderr.on('data', (data) => { stderr += data; });
+
+  child.on('close', (code) => {
+    clearTimeout(timeout);
+    isScriptRunning = false;
+
+    if (killed) {
+      callback && callback(new Error('timeout'), '');
+    } else if (code !== 0) {
+      callback && callback(new Error(stderr), '');
+    } else {
+      callback && callback(null, stdout);
+    }
+
+    // 处理下一个
+    setImmediate(processScriptQueue);
+  });
+
+  child.on('error', (err) => {
+    clearTimeout(timeout);
+    isScriptRunning = false;
+    callback && callback(err, '');
+    setImmediate(processScriptQueue);
+  });
+}
 
 // ============================================================================
 // WINDOW CREATION
@@ -232,7 +287,6 @@ async function getZedWorkspacesFresh() {
 // ============================================================================
 
 function adjustZedWindows() {
-  // 获取工作区信息（workArea.y 是菜单栏高度）
   const display = screen.getPrimaryDisplay();
   const menuBarHeight = display.workArea.y;
   const { width, height } = display.workAreaSize;
@@ -247,7 +301,7 @@ function adjustZedWindows() {
       end repeat
     end tell
   end tell`;
-  exec(`osascript -e '${script}'`);
+  runAppleScript(script);
 }
 
 function getZedWindows() {
@@ -256,17 +310,15 @@ function getZedWindows() {
       if not (exists process "Zed") then return ""
       tell process "Zed" to get name of every window
     end tell`;
-    exec(`osascript -e '${script}'`, async (err, stdout) => {
+    runAppleScript(script, (err, stdout) => {
       if (err || !stdout.trim()) return resolve([]);
 
-      // 获取 Zed 数据库中的路径映射
       const workspaces = getZedWorkspacesCached();
 
       let emptyCount = 0;
       const windows = stdout.trim().split(', ')
         .filter(name => name)
         .map(windowName => {
-          // empty project 需要编号区分
           if (windowName === 'empty project') {
             return {
               windowName: `empty project (${++emptyCount})`,
@@ -275,18 +327,16 @@ function getZedWindows() {
             };
           }
 
-          // 提取项目名（去掉 " — 文件名" 部分）
           const projectName = windowName.includes(' — ')
             ? windowName.split(' — ')[0]
             : windowName;
 
-          // 从数据库查找对应路径
           const projectPath = workspaces[projectName] || null;
 
           return {
-            windowName,      // 完整窗口名（用于 AppleScript 匹配）
-            path: projectPath,  // 项目路径（唯一标识）
-            displayName: projectName  // 显示名（项目名）
+            windowName,
+            path: projectPath,
+            displayName: projectName
           };
         });
       resolve(windows);
@@ -295,7 +345,6 @@ function getZedWindows() {
 }
 
 function activateZedWindowByName(windowName) {
-  // 处理 empty project (N) 格式
   const match = windowName.match(/^empty project \((\d+)\)$/);
   if (match) {
     const index = parseInt(match[1]);
@@ -314,10 +363,10 @@ function activateZedWindowByName(windowName) {
         end repeat
       end tell
     end tell`;
-    exec(`osascript -e '${script}'`);
+    runAppleScript(script);
     return;
   }
-  
+
   const script = `tell application "System Events"
     tell process "Zed"
       repeat with w in every window
@@ -329,7 +378,7 @@ function activateZedWindowByName(windowName) {
       end repeat
     end tell
   end tell`;
-  exec(`osascript -e '${script}'`);
+  runAppleScript(script);
 }
 
 // ============================================================================
@@ -429,14 +478,12 @@ ipcMain.handle('open-folder-in-zed', (_, folderPath) => {
 
 function startHideCheck() {
   let lastFrontApp = '';
-  let isChecking = false;
 
   setInterval(() => {
-    if (isSystemDialogOpen || isChecking) return;
+    if (isSystemDialogOpen) return;
 
-    isChecking = true;
-    exec(`osascript -e 'tell application "System Events" to get name of first process whose frontmost is true' 2>/dev/null`, (err, stdout) => {
-      isChecking = false;
+    const script = 'tell application "System Events" to get name of first process whose frontmost is true';
+    runAppleScript(script, (err, stdout) => {
       const win = mainWindow;
       if (err || !win || win.isDestroyed()) return;
 
