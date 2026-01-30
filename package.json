@@ -1,6 +1,6 @@
 {
   "name": "zed-workspace-manager",
-  "version": "1.0.0",
+  "version": "1.2.2",
   "description": "A workspace manager for Zed editor with project tabs",
   "main": "main.js",
   "scripts": {
