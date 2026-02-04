@@ -15,6 +15,25 @@ const { exec, spawn } = require('child_process');
 const fs = require('fs');
 
 // ============================================================================
+// SINGLE INSTANCE LOCK - 防止多开僵尸进程
+// ============================================================================
+
+const gotTheLock = app.requestSingleInstanceLock();
+if (!gotTheLock) {
+  // 已有实例运行，直接退出
+  app.quit();
+} else {
+  app.on('second-instance', () => {
+    // 有人尝试启动第二个实例，聚焦现有窗口
+    if (mainWindow) {
+      if (mainWindow.isMinimized()) mainWindow.restore();
+      mainWindow.show();
+      mainWindow.focus();
+    }
+  });
+}
+
+// ============================================================================
 // CONFIG
 // ============================================================================
 
@@ -533,9 +552,8 @@ app.whenReady().then(() => {
 
 app.on('window-all-closed', () => {
   globalShortcut.unregisterAll();
-  if (process.platform !== 'darwin') {
-    app.quit();
-  }
+  // 工具类应用：关窗即退出，不留僵尸进程
+  app.quit();
 });
 
 app.on('activate', () => {
