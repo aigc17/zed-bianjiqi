@@ -13,7 +13,11 @@
 ├── CLAUDE.md       ← 项目宪法
 ├── package.json    ← 项目配置
 ├── main.js         ← Electron 主进程，窗口管理 + IPC + AppleScript 控制
-└── index.html      ← 渲染进程，标签栏 UI
+├── index.html      ← 渲染进程，标签栏 UI
+└── scripts/        ← 运维脚本
+    ├── start.sh    ← 启动（自动清理残留进程）
+    ├── stop.sh     ← 关闭（杀掉所有相关进程）
+    └── restart.sh  ← 重启（卡死时使用）
 ```
 
 ---
@@ -33,7 +37,10 @@
 ## 使用
 
 ```bash
-npm start    # 启动应用
+./scripts/start.sh    # 启动（推荐，自动清理残留）
+./scripts/stop.sh     # 关闭
+./scripts/restart.sh  # 重启（卡死时使用）
+npm start             # 直接启动
 ```
 
 ---

@@ -31,17 +31,34 @@ npm install
 npm start
 ```
 
-## 日常启动
+## 日常使用
 
 本应用是纯本地桌面应用，**不占用任何网络端口**，不会与其他开发项目冲突。
 
-```bash
-# 进入项目目录启动
-cd /path/to/zed-bianjiqi && npm start
+### 脚本命令（推荐）
 
-# 或后台运行（不占用终端）
-cd /path/to/zed-bianjiqi && npm start &
+```bash
+# 启动（自动清理残留进程）
+./scripts/start.sh
+
+# 关闭
+./scripts/stop.sh
+
+# 重启（卡死时使用）
+./scripts/restart.sh
 ```
+
+### npm 命令
+
+```bash
+# 启动
+npm start
+
+# 后台运行（不占用终端）
+npm start &
+```
+
+> **提示**：如果应用卡死，直接运行 `./restart.sh` 即可，脚本会自动杀掉残留进程并重新启动。
 
 ## 开机自启（可选）
 
