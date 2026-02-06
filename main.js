@@ -51,27 +51,54 @@ let zedWorkspaceCache = { mapping: {}, lastUpdated: 0 };
 let zedWorkspaceRefreshPromise = null;
 
 // ============================================================================
-// APPLESCRIPT EXECUTOR - 统一执行器，防止进程堆积
+// APPLESCRIPT EXECUTOR - 双通道队列，用户操作优先，轮询可丢弃
 // ============================================================================
 
-const scriptQueue = [];
+const userQueue = [];   // 用户操作：不可丢弃，优先执行
+const pollQueue = [];   // 轮询任务：可丢弃，新任务替换旧任务
 let isScriptRunning = false;
 
-function runAppleScript(script, callback) {
-  scriptQueue.push({ script, callback });
+function runAppleScript(script, callback, options) {
+  const { priority = 'user', droppable = false } = options || {};
+
+  if (priority === 'poll') {
+    // 轮询通道：droppable 任务入队时替换旧的，防止堆积
+    if (droppable) {
+      pollQueue.length = 0;
+    }
+    pollQueue.push({ script, callback, droppable });
+  } else {
+    userQueue.push({ script, callback });
+  }
+
   processScriptQueue();
 }
 
 function processScriptQueue() {
-  if (isScriptRunning || scriptQueue.length === 0) return;
+  if (isScriptRunning) return;
+
+  // 用户队列优先
+  const task = userQueue.shift() || pollQueue.shift();
+  if (!task) return;
 
   isScriptRunning = true;
-  const { script, callback } = scriptQueue.shift();
+  const { script, callback } = task;
 
   const child = spawn('osascript', ['-e', script]);
   let stdout = '';
   let stderr = '';
   let killed = false;
+  let callbackCalled = false;
+
+  // 安全回调：close + error 都可能触发，只调用一次
+  function safeCallback(err, result) {
+    if (callbackCalled) return;
+    callbackCalled = true;
+    clearTimeout(timeout);
+    isScriptRunning = false;
+    callback && callback(err, result);
+    setImmediate(processScriptQueue);
+  }
 
   const timeout = setTimeout(() => {
     killed = true;
@@ -82,26 +109,17 @@ function processScriptQueue() {
   child.stderr.on('data', (data) => { stderr += data; });
 
   child.on('close', (code) => {
-    clearTimeout(timeout);
-    isScriptRunning = false;
-
     if (killed) {
-      callback && callback(new Error('timeout'), '');
+      safeCallback(new Error('timeout'), '');
     } else if (code !== 0) {
-      callback && callback(new Error(stderr), '');
+      safeCallback(new Error(stderr), '');
     } else {
-      callback && callback(null, stdout);
+      safeCallback(null, stdout);
     }
-
-    // 处理下一个
-    setImmediate(processScriptQueue);
   });
 
   child.on('error', (err) => {
-    clearTimeout(timeout);
-    isScriptRunning = false;
-    callback && callback(err, '');
-    setImmediate(processScriptQueue);
+    safeCallback(err, '');
   });
 }
 
@@ -493,12 +511,18 @@ ipcMain.handle('open-folder-in-zed', (_, folderPath) => {
 
 function startHideCheck() {
   let lastFrontApp = '';
+  let isPollInFlight = false;
 
   setInterval(() => {
     if (isSystemDialogOpen) return;
+    // 上次轮询还没返回，跳过本次
+    if (isPollInFlight) return;
 
+    isPollInFlight = true;
     const script = 'tell application "System Events" to get name of first process whose frontmost is true';
     runAppleScript(script, (err, stdout) => {
+      isPollInFlight = false;
+
       const win = mainWindow;
       if (err || !win || win.isDestroyed()) return;
 
@@ -522,7 +546,7 @@ function startHideCheck() {
         adjustZedWindows();
       }
       lastFrontApp = frontApp;
-    });
+    }, { priority: 'poll', droppable: true });
   }, 1000);
 }
 

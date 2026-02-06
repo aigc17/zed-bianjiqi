@@ -185,6 +185,26 @@
       border-radius: 50%;
       flex-shrink: 0;
     }
+
+    /* Loading 状态 */
+    .add-btn.loading {
+      pointer-events: none;
+      opacity: 0.5;
+    }
+    .add-btn.loading::after {
+      content: '';
+      position: absolute;
+      width: 12px; height: 12px;
+      border: 2px solid rgba(255,255,255,0.3);
+      border-top-color: #fff;
+      border-radius: 50%;
+      animation: spin 0.6s linear infinite;
+    }
+    .tab.loading {
+      pointer-events: none;
+      opacity: 0.6;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
   </style>
 </head>
 <body>
@@ -197,14 +217,30 @@
 
   <script>
     const { ipcRenderer } = require('electron');
-    
+
+    // ========================================================================
+    // IPC 超时保护
+    // ========================================================================
+
+    function ipcWithTimeout(channel, args = [], timeoutMs = 5000) {
+      return new Promise((resolve, reject) => {
+        const timer = setTimeout(() => {
+          reject(new Error(`IPC "${channel}" 超时 (${timeoutMs}ms)`));
+        }, timeoutMs);
+        ipcRenderer.invoke(channel, ...args)
+          .then(resolve, reject)
+          .finally(() => clearTimeout(timer));
+      });
+    }
+
     const COLORS = ['#e91e63', '#00bfa5', '#c6a700', '#2196f3', '#9c27b0', '#00bcd4'];
-    
+
     let projects = [];
     let activeIndex = -1;
     let draggedIndex = null;
     let dropdownOpen = false;
     let contextMenuIndex = -1;
+    let isOperationPending = false;
     
     // ========================================================================
     // RENDER
@@ -272,24 +308,24 @@
       menu.style.top = e.clientY + 'px';
       menu.classList.add('show');
       
-      await ipcRenderer.invoke('set-window-height', 200);
-      
+      await ipcWithTimeout('set-window-height', [200]).catch(e => console.error(e));
+
       menu.querySelector('[data-action="rename"]').addEventListener('click', () => startRename(index));
       menu.querySelector('[data-action="remove"]').addEventListener('click', () => { hideContextMenu(); removeProject(index); });
       menu.querySelectorAll('.color-dot').forEach(dot => {
         dot.addEventListener('click', () => setColor(index, dot.dataset.color));
       });
     }
-    
+
     async function hideContextMenu() {
       document.getElementById('contextMenu').classList.remove('show');
       contextMenuIndex = -1;
-      await ipcRenderer.invoke('set-window-height', 36);
+      await ipcWithTimeout('set-window-height', [36]).catch(e => console.error(e));
     }
-    
+
     async function setColor(index, color) {
       projects[index].color = color || undefined;
-      await ipcRenderer.invoke('save-projects', projects);
+      await ipcWithTimeout('save-projects', [projects]).catch(e => console.error(e));
       render();
       hideContextMenu();
     }
@@ -309,7 +345,7 @@
         const newName = input.value.trim();
         if (newName && newName !== currentName) {
           projects[index].displayName = newName;
-          await ipcRenderer.invoke('save-projects', projects);
+          await ipcWithTimeout('save-projects', [projects]).catch(e => console.error(e));
         }
         render();
       };
@@ -326,91 +362,106 @@
     // ========================================================================
     
     async function toggleDropdown() {
+      if (isOperationPending) return;
       const dropdown = document.getElementById('dropdown');
       if (dropdownOpen) {
         dropdown.classList.remove('show');
         dropdownOpen = false;
-        await ipcRenderer.invoke('set-window-height', 36);
+        await ipcWithTimeout('set-window-height', [36]).catch(e => console.error(e));
         return;
       }
 
-      // windows 现在是对象数组: { windowName, path, displayName }
-      const windows = await ipcRenderer.invoke('get-zed-windows');
-      const existingPaths = projects.map(p => p.path).filter(Boolean);
+      const addBtn = document.getElementById('addBtn');
+      addBtn.classList.add('loading');
+      isOperationPending = true;
 
-      // 过滤已添加的窗口（用 path 匹配）
-      const available = windows.filter(w => {
-        if (!w.path) return true; // empty project 没有 path，始终显示
-        return !existingPaths.includes(w.path);
-      });
+      try {
+        // windows 现在是对象数组: { windowName, path, displayName }
+        const windows = await ipcWithTimeout('get-zed-windows', [], 10000);
+        const existingPaths = projects.map(p => p.path).filter(Boolean);
 
-      let html = '<div class="dropdown-item new-folder" data-action="new-folder">📂 选择文件夹新建...</div>';
+        // 过滤已添加的窗口（用 path 匹配）
+        const available = windows.filter(w => {
+          if (!w.path) return true; // empty project 没有 path，始终显示
+          return !existingPaths.includes(w.path);
+        });
 
-      if (available.length > 0) {
-        html += '<div class="dropdown-divider"></div>';
-        html += '<div class="dropdown-label">已打开的窗口</div>';
-        html += available.map((w, i) =>
-          `<div class="dropdown-item" data-index="${i}">${w.displayName}</div>`
-        ).join('');
+        let html = '<div class="dropdown-item new-folder" data-action="new-folder">📂 选择文件夹新建...</div>';
+
+        if (available.length > 0) {
+          html += '<div class="dropdown-divider"></div>';
+          html += '<div class="dropdown-label">已打开的窗口</div>';
+          html += available.map((w, i) =>
+            `<div class="dropdown-item" data-index="${i}">${w.displayName}</div>`
+          ).join('');
+        }
+
+        dropdown.innerHTML = html;
+
+        dropdown.querySelector('[data-action="new-folder"]').addEventListener('click', selectNewFolder);
+        dropdown.querySelectorAll('.dropdown-item[data-index]').forEach(item => {
+          const w = available[parseInt(item.dataset.index)];
+          item.addEventListener('click', () => addFromDropdown(w));
+        });
+
+        dropdown.classList.add('show');
+        dropdownOpen = true;
+        // 根据实际内容计算高度，不超过屏幕高度
+        const itemCount = available.length + 2; // +2 for "选择文件夹" and divider/label
+        const contentHeight = itemCount * 40 + 20;
+        const maxHeight = window.screen.availHeight - 50; // 留一点边距
+        const finalHeight = Math.min(contentHeight, maxHeight);
+        // 如果内容超出，给 dropdown 设置 max-height
+        if (contentHeight > maxHeight) {
+          dropdown.style.maxHeight = (maxHeight - 36) + 'px';
+        } else {
+          dropdown.style.maxHeight = '';
+        }
+        await ipcWithTimeout('set-window-height', [36 + finalHeight]).catch(e => console.error(e));
+      } catch (e) {
+        console.error('[toggleDropdown]', e);
+      } finally {
+        addBtn.classList.remove('loading');
+        isOperationPending = false;
       }
-
-      dropdown.innerHTML = html;
-
-      dropdown.querySelector('[data-action="new-folder"]').addEventListener('click', selectNewFolder);
-      dropdown.querySelectorAll('.dropdown-item[data-index]').forEach(item => {
-        const w = available[parseInt(item.dataset.index)];
-        item.addEventListener('click', () => addFromDropdown(w));
-      });
-
-      dropdown.classList.add('show');
-      dropdownOpen = true;
-      // 根据实际内容计算高度，不超过屏幕高度
-      const itemCount = available.length + 2; // +2 for "选择文件夹" and divider/label
-      const contentHeight = itemCount * 40 + 20;
-      const maxHeight = window.screen.availHeight - 50; // 留一点边距
-      const finalHeight = Math.min(contentHeight, maxHeight);
-      // 如果内容超出，给 dropdown 设置 max-height
-      if (contentHeight > maxHeight) {
-        dropdown.style.maxHeight = (maxHeight - 36) + 'px';
-      } else {
-        dropdown.style.maxHeight = '';
-      }
-      await ipcRenderer.invoke('set-window-height', 36 + finalHeight);
     }
 
     async function selectNewFolder() {
-      console.log('[renderer] selectNewFolder 开始', Date.now());
+      if (isOperationPending) return;
+      isOperationPending = true;
+      const addBtn = document.getElementById('addBtn');
+      addBtn.classList.add('loading');
+
       // 直接关闭下拉菜单，不等待
       document.getElementById('dropdown').classList.remove('show');
       dropdownOpen = false;
-      ipcRenderer.invoke('set-window-height', 36); // 不 await
-      console.log('[renderer] 准备调用 select-folder', Date.now());
+      ipcWithTimeout('set-window-height', [36]).catch(e => console.error(e));
 
-      const folderPath = await ipcRenderer.invoke('select-folder');
-      console.log('[renderer] select-folder 返回', Date.now());
-      if (folderPath) {
-        const displayName = await ipcRenderer.invoke('open-folder-in-zed', folderPath);
-        projects.push({
-          path: folderPath,
-          displayName: displayName
-        });
-        await ipcRenderer.invoke('save-projects', projects);
-        render();
+      try {
+        const folderPath = await ipcWithTimeout('select-folder', [], 30000);
+        if (folderPath) {
+          const displayName = await ipcWithTimeout('open-folder-in-zed', [folderPath]);
+          projects.push({ path: folderPath, displayName });
+          await ipcWithTimeout('save-projects', [projects]);
+          render();
+        }
+      } catch (e) {
+        console.error('[selectNewFolder]', e);
+      } finally {
+        addBtn.classList.remove('loading');
+        isOperationPending = false;
       }
     }
 
     async function closeDropdown() {
       document.getElementById('dropdown').classList.remove('show');
       dropdownOpen = false;
-      await ipcRenderer.invoke('set-window-height', 36);
+      await ipcWithTimeout('set-window-height', [36]).catch(e => console.error(e));
     }
 
     async function addFromDropdown(w) {
-      projects.push({
-        path: w.path,
-        displayName: w.displayName
-      });
-      await ipcRenderer.invoke('save-projects', projects);
+      projects.push({ path: w.path, displayName: w.displayName });
+      await ipcWithTimeout('save-projects', [projects]).catch(e => console.error(e));
       render();
       await closeDropdown();
     }
@@ -420,17 +471,30 @@
     // ========================================================================
 
     async function openProject(index) {
+      if (isOperationPending) return;
+      isOperationPending = true;
       activeIndex = index;
       render();
-      const p = projects[index];
-      // 用 path 打开项目（如果有），否则用 displayName 匹配窗口
-      await ipcRenderer.invoke('open-project', p.path || p.displayName);
+
+      // 给当前 tab 加 loading 状态
+      const tab = document.querySelector(`.tab[data-index="${index}"]`);
+      if (tab) tab.classList.add('loading');
+
+      try {
+        const p = projects[index];
+        await ipcWithTimeout('open-project', [p.path || p.displayName], 10000);
+      } catch (e) {
+        console.error('[openProject]', e);
+      } finally {
+        if (tab) tab.classList.remove('loading');
+        isOperationPending = false;
+      }
     }
     
     async function removeProject(index) {
       projects.splice(index, 1);
       if (activeIndex >= projects.length) activeIndex = projects.length - 1;
-      await ipcRenderer.invoke('save-projects', projects);
+      await ipcWithTimeout('save-projects', [projects]).catch(e => console.error(e));
       render();
     }
     
@@ -440,7 +504,7 @@
       if (activeIndex === from) activeIndex = to;
       else if (from < activeIndex && to >= activeIndex) activeIndex--;
       else if (from > activeIndex && to <= activeIndex) activeIndex++;
-      await ipcRenderer.invoke('save-projects', projects);
+      await ipcWithTimeout('save-projects', [projects]).catch(e => console.error(e));
       render();
     }
     
@@ -449,7 +513,12 @@
     // ========================================================================
     
     async function init() {
-      projects = await ipcRenderer.invoke('get-projects');
+      try {
+        projects = await ipcWithTimeout('get-projects', [], 10000);
+      } catch (e) {
+        console.error('[init]', e);
+        projects = [];
+      }
       render();
     }
     
