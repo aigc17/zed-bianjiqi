@@ -3,8 +3,8 @@
  * [INPUT]: AppleScript - macOS 窗口控制，通过 System Events 检测/激活 Zed 窗口
  * [INPUT]: Zed SQLite DB - 异步读取并缓存工作区路径信息
  * [INPUT]: dialog_state.json - 记录上次选择的目录，用于系统对话框 defaultPath（避开慢路径）
- * [OUTPUT]: 主进程，创建悬浮标签栏窗口，提供 IPC 接口（含系统对话框前置处理与默认路径优化）
- * [POS]: 应用入口，管理窗口生命周期、IPC 通信、智能切换 Zed 窗口（已打开激活，未打开新建）
+ * [OUTPUT]: 主进程，创建悬浮标签栏窗口，提供 IPC 接口与当前激活项目同步（含系统对话框前置处理与默认路径优化）
+ * [POS]: 应用入口，管理窗口生命周期、IPC 通信、智能切换 Zed 窗口，并把真实前台项目状态同步给渲染层
  *
  * [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
  */
@@ -46,6 +46,8 @@ const OSASCRIPT_TIMEOUT_MS = 3000;
 const SQLITE_TIMEOUT_MS = 2000;
 const HIDE_CHECK_INTERVAL_MS = 1000;
 const ZED_ADJUST_DEBOUNCE_MS = 1500;
+const FRONT_STATE_SEPARATOR = '||';
+const FRONT_STATE_SCRIPT = `tell application "System Events" \nset frontApp to name of first process whose frontmost is true\nif frontApp is "Zed" then\n  tell process "Zed"\n    if (count of windows) > 0 then return frontApp & "${FRONT_STATE_SEPARATOR}" & name of front window\n  end tell\nend if\nreturn frontApp\nend tell`;
 
 let mainWindow = null;
 let isSystemDialogOpen = false;
@@ -54,6 +56,7 @@ let zedWorkspaceCache = { mapping: {}, lastUpdated: 0 };
 let zedWorkspaceRefreshPromise = null;
 let projectsMemoryCache = null;
 let hideCheckTimer = null;
+let activeProject = null;
 
 // ============================================================================
 // APPLESCRIPT EXECUTOR - 双通道队列，用户操作优先，轮询可丢弃
@@ -455,6 +458,25 @@ function openProjectPathInZed(projectPath) {
   });
 }
 
+function getActiveProjectFromWindowName(windowName) {
+  if (!windowName) return null;
+  if (windowName === 'empty project') return { path: null, displayName: 'empty project' };
+  const displayName = windowName.includes(' — ') ? windowName.split(' — ')[0] : windowName;
+  return { path: getZedWorkspacesCached()[displayName] || null, displayName };
+}
+
+function syncActiveProject(project) {
+  const nextProject = project || null;
+  if (
+    (activeProject && nextProject &&
+      activeProject.path === nextProject.path &&
+      activeProject.displayName === nextProject.displayName) ||
+    (!activeProject && !nextProject)
+  ) return;
+  activeProject = nextProject;
+  if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('active-project-changed', activeProject);
+}
+
 function getZedWindows() {
   return new Promise((resolve) => {
     const script = `tell application "System Events"
@@ -610,6 +632,7 @@ ipcMain.handle('open-project', async (_, pathOrName) => {
 });
 
 ipcMain.handle('get-zed-windows', () => getZedWindows());
+ipcMain.handle('get-active-project', () => activeProject);
 
 ipcMain.handle('set-window-height', (_, height) => {
   if (mainWindow) mainWindow.setSize(mainWindow.getSize()[0], height);
@@ -686,14 +709,18 @@ function startHideCheck() {
     if (isPollInFlight) return;
 
     isPollInFlight = true;
-    const script = 'tell application "System Events" to get name of first process whose frontmost is true';
-    runAppleScript(script, (err, stdout) => {
+    runAppleScript(FRONT_STATE_SCRIPT, (err, stdout) => {
       isPollInFlight = false;
       const win = mainWindow;
       if (err || !win || win.isDestroyed()) return;
 
-      const frontApp = stdout.trim().toLowerCase();
+      const [frontAppRaw, frontWindowName = ''] = stdout.trim().split(FRONT_STATE_SEPARATOR);
+      const frontApp = frontAppRaw.trim().toLowerCase();
       const shouldShow = frontApp === 'zed' || frontApp === 'electron';
+
+      if (frontApp === 'zed') {
+        syncActiveProject(getActiveProjectFromWindowName(frontWindowName.trim()));
+      }
 
       try {
         if (shouldShow && !win.isVisible()) {

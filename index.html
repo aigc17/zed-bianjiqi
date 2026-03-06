@@ -2,8 +2,8 @@
 <!--
   [INPUT]: ipcRenderer - 渲染进程与主进程通信，调用项目管理与系统对话框 IPC
   [INPUT]: main.js - 提供窗口管理、项目持久化、文件夹选择等主进程能力
-  [OUTPUT]: 顶部标签栏 UI、交互逻辑、项目列表渲染与拖拽排序
-  [POS]: 渲染进程入口，承载 Zed 项目标签栏的可视化与交互
+  [OUTPUT]: 顶部标签栏 UI、交互逻辑、项目列表渲染拖拽排序与当前项目高亮同步
+  [POS]: 渲染进程入口，承载 Zed 项目标签栏的可视化与交互，并把真实当前项目显式呈现给用户
   
   [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
 -->
@@ -49,14 +49,21 @@
       gap: 6px;
       padding: 6px 12px;
       background: rgba(255, 255, 255, 0.08);
+      border: 1px solid transparent;
       border-radius: 6px;
       color: rgba(255, 255, 255, 0.7);
       cursor: pointer;
       transition: all 0.15s ease;
       white-space: nowrap;
+      position: relative;
     }
     .tab:hover { background: rgba(255, 255, 255, 0.15); color: #fff; }
-    .tab.active { background: rgba(99, 102, 241, 0.6); color: #fff; }
+    .tab.active {
+      background: linear-gradient(135deg, rgba(99, 102, 241, 0.9), rgba(79, 70, 229, 0.82));
+      border-color: rgba(255, 255, 255, 0.22);
+      box-shadow: 0 8px 18px rgba(79, 70, 229, 0.28);
+      color: #fff;
+    }
     .tab.custom-color {
       background: var(--tab-bg);
       color: #fff;
@@ -66,9 +73,23 @@
     }
     .tab.custom-color.active {
       background: var(--tab-bg-active);
+      border-color: rgba(255, 255, 255, 0.24);
+      box-shadow: 0 8px 18px rgba(0, 0, 0, 0.24);
     }
+    .tab .name { font-weight: 500; }
+    .tab.active .name { font-weight: 700; }
     .tab.custom-color .shortcut { opacity: 0.72; }
     .tab .shortcut { font-size: 10px; opacity: 0.5; margin-left: 4px; }
+    .tab.active .shortcut { opacity: 0.88; }
+    .tab .active-badge {
+      padding: 1px 6px;
+      border-radius: 999px;
+      background: rgba(255, 255, 255, 0.18);
+      color: #fff;
+      font-size: 10px;
+      font-weight: 700;
+      letter-spacing: 0.04em;
+    }
     .tab .close {
       opacity: 0; margin-left: 4px; width: 14px; height: 14px;
       border-radius: 3px; display: flex; align-items: center;
@@ -273,7 +294,8 @@
     const COLORS = ['#e91e63', '#00bfa5', '#c6a700', '#2196f3', '#9c27b0', '#00bcd4'];
 
     let projects = [];
-    let activeIndex = -1;
+    let activeProject = null;
+    let confirmedActiveProject = null;
     let draggedIndex = null;
     let dropdownOpen = false;
     let contextMenuIndex = -1;
@@ -315,6 +337,39 @@
         .replace(/'/g, '&#39;');
     }
 
+    function getProjectDisplayName(project) {
+      return project.displayName || project.name || 'untitled';
+    }
+
+    function cloneProjectState(project) {
+      if (!project) return null;
+      return {
+        path: project.path || null,
+        displayName: getProjectDisplayName(project)
+      };
+    }
+
+    function isEmptyProjectName(name) {
+      return /^empty project(?: \(\d+\))?$/.test(name || '');
+    }
+
+    function isProjectActive(project) {
+      if (!activeProject) return false;
+      if (activeProject.path && project.path) {
+        return activeProject.path === project.path;
+      }
+      if (activeProject.path || project.path) return false;
+
+      const name = getProjectDisplayName(project);
+      if (name === activeProject.displayName) return true;
+
+      if (!isEmptyProjectName(activeProject.displayName) || !isEmptyProjectName(name)) {
+        return false;
+      }
+
+      return projects.filter(item => !item.path && isEmptyProjectName(getProjectDisplayName(item))).length === 1;
+    }
+
     function showToast(message, duration = 2500) {
       const toast = document.getElementById('toast');
       if (!toast || !message) return;
@@ -336,11 +391,13 @@
       const container = document.getElementById('tabs');
       container.innerHTML = projects.map((p, i) => {
         const colorStyle = getTabColorStyle(p.color);
-        const tabClasses = `tab ${i === activeIndex ? 'active' : ''} ${colorStyle ? 'custom-color' : ''}`;
-        const displayName = escapeHtml(p.displayName || p.name || 'untitled');
+        const isActive = isProjectActive(p);
+        const tabClasses = `tab ${isActive ? 'active' : ''} ${colorStyle ? 'custom-color' : ''}`;
+        const displayName = escapeHtml(getProjectDisplayName(p));
         return `
         <div class="${tabClasses.trim()}" data-index="${i}" draggable="true" style="${colorStyle}">
           <span class="name">${displayName}</span>
+          ${isActive ? '<span class="active-badge">当前</span>' : ''}
           ${i < 9 ? `<span class="shortcut">⌥${i + 1}</span>` : ''}
           <span class="close" data-action="remove">×</span>
         </div>
@@ -566,7 +623,8 @@
     async function openProject(index) {
       if (isOperationPending) return;
       isOperationPending = true;
-      activeIndex = index;
+      const previousActiveProject = activeProject;
+      activeProject = cloneProjectState(projects[index]);
       render();
 
       // 给当前 tab 加 loading 状态
@@ -577,11 +635,15 @@
         const p = projects[index];
         const result = await ipcWithTimeout('open-project', [p.path || p.displayName], 10000);
         if (!result || !result.ok) {
+          activeProject = confirmedActiveProject || previousActiveProject;
+          render();
           const fallbackName = p.displayName || p.path || '该项目';
           showToast(result && result.message ? result.message : `打开失败：${fallbackName}`);
         }
       } catch (e) {
         console.error('[openProject]', e);
+        activeProject = confirmedActiveProject || previousActiveProject;
+        render();
         showToast('打开项目失败，请重试');
       } finally {
         if (tab) tab.classList.remove('loading');
@@ -591,7 +653,6 @@
     
     async function removeProject(index) {
       projects.splice(index, 1);
-      if (activeIndex >= projects.length) activeIndex = projects.length - 1;
       await ipcWithTimeout('save-projects', [projects]).catch(e => console.error(e));
       render();
     }
@@ -599,9 +660,6 @@
     async function reorderProjects(from, to) {
       const [item] = projects.splice(from, 1);
       projects.splice(to, 0, item);
-      if (activeIndex === from) activeIndex = to;
-      else if (from < activeIndex && to >= activeIndex) activeIndex--;
-      else if (from > activeIndex && to <= activeIndex) activeIndex++;
       await ipcWithTimeout('save-projects', [projects]).catch(e => console.error(e));
       render();
     }
@@ -613,12 +671,20 @@
     async function init() {
       try {
         projects = await ipcWithTimeout('get-projects', [], 10000);
+        confirmedActiveProject = await ipcWithTimeout('get-active-project', [], 3000);
+        activeProject = confirmedActiveProject;
       } catch (e) {
         console.error('[init]', e);
         projects = [];
       }
       render();
     }
+
+    ipcRenderer.on('active-project-changed', (_, project) => {
+      confirmedActiveProject = project || null;
+      activeProject = confirmedActiveProject;
+      render();
+    });
     
     document.getElementById('addBtn').addEventListener('click', (e) => {
       e.stopPropagation();
