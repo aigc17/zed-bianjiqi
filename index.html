@@ -57,6 +57,17 @@
     }
     .tab:hover { background: rgba(255, 255, 255, 0.15); color: #fff; }
     .tab.active { background: rgba(99, 102, 241, 0.6); color: #fff; }
+    .tab.custom-color {
+      background: var(--tab-bg);
+      color: #fff;
+    }
+    .tab.custom-color:hover {
+      background: var(--tab-bg-hover);
+    }
+    .tab.custom-color.active {
+      background: var(--tab-bg-active);
+    }
+    .tab.custom-color .shortcut { opacity: 0.72; }
     .tab .shortcut { font-size: 10px; opacity: 0.5; margin-left: 4px; }
     .tab .close {
       opacity: 0; margin-left: 4px; width: 14px; height: 14px;
@@ -205,6 +216,31 @@
       opacity: 0.6;
     }
     @keyframes spin { to { transform: rotate(360deg); } }
+
+    /* 轻提示 */
+    .toast {
+      position: fixed;
+      right: 10px;
+      top: 6px;
+      max-width: 420px;
+      padding: 6px 10px;
+      border-radius: 6px;
+      font-size: 12px;
+      line-height: 1.2;
+      color: #fff;
+      background: rgba(190, 52, 52, 0.95);
+      border: 1px solid rgba(255, 255, 255, 0.2);
+      box-shadow: 0 6px 16px rgba(0, 0, 0, 0.32);
+      opacity: 0;
+      transform: translateY(-4px);
+      transition: opacity 0.15s ease, transform 0.15s ease;
+      pointer-events: none;
+      z-index: 3000;
+    }
+    .toast.show {
+      opacity: 1;
+      transform: translateY(0);
+    }
   </style>
 </head>
 <body>
@@ -214,6 +250,7 @@
   </div>
   <div class="dropdown" id="dropdown"></div>
   <div class="context-menu" id="contextMenu"></div>
+  <div class="toast" id="toast"></div>
 
   <script>
     const { ipcRenderer } = require('electron');
@@ -241,6 +278,55 @@
     let dropdownOpen = false;
     let contextMenuIndex = -1;
     let isOperationPending = false;
+    let toastTimer = null;
+
+    function hexToRgba(hex, alpha) {
+      if (!hex) return '';
+      const normalized = hex.replace('#', '').trim();
+      const expanded = normalized.length === 3
+        ? normalized.split('').map(ch => ch + ch).join('')
+        : normalized;
+
+      if (!/^[0-9a-fA-F]{6}$/.test(expanded)) return '';
+
+      const r = parseInt(expanded.slice(0, 2), 16);
+      const g = parseInt(expanded.slice(2, 4), 16);
+      const b = parseInt(expanded.slice(4, 6), 16);
+      return `rgba(${r}, ${g}, ${b}, ${alpha})`;
+    }
+
+    function getTabColorStyle(color) {
+      if (!color) return '';
+
+      const base = hexToRgba(color, 0.34);
+      const hover = hexToRgba(color, 0.48);
+      const active = hexToRgba(color, 0.62);
+      if (!base || !hover || !active) return '';
+
+      return `--tab-bg:${base};--tab-bg-hover:${hover};--tab-bg-active:${active};`;
+    }
+
+    function escapeHtml(value) {
+      return String(value ?? '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+    }
+
+    function showToast(message, duration = 2500) {
+      const toast = document.getElementById('toast');
+      if (!toast || !message) return;
+
+      toast.textContent = message;
+      toast.classList.add('show');
+
+      if (toastTimer) clearTimeout(toastTimer);
+      toastTimer = setTimeout(() => {
+        toast.classList.remove('show');
+      }, duration);
+    }
     
     // ========================================================================
     // RENDER
@@ -248,14 +334,18 @@
 
     function render() {
       const container = document.getElementById('tabs');
-      container.innerHTML = projects.map((p, i) => `
-        <div class="tab ${i === activeIndex ? 'active' : ''}" data-index="${i}" draggable="true"
-             style="${p.color ? `border-left: 3px solid ${p.color}` : ''}">
-          <span class="name">${p.displayName}</span>
+      container.innerHTML = projects.map((p, i) => {
+        const colorStyle = getTabColorStyle(p.color);
+        const tabClasses = `tab ${i === activeIndex ? 'active' : ''} ${colorStyle ? 'custom-color' : ''}`;
+        const displayName = escapeHtml(p.displayName || p.name || 'untitled');
+        return `
+        <div class="${tabClasses.trim()}" data-index="${i}" draggable="true" style="${colorStyle}">
+          <span class="name">${displayName}</span>
           ${i < 9 ? `<span class="shortcut">⌥${i + 1}</span>` : ''}
           <span class="close" data-action="remove">×</span>
         </div>
-      `).join('');
+      `;
+      }).join('');
       
       container.querySelectorAll('.tab').forEach(tab => {
         const index = parseInt(tab.dataset.index);
@@ -335,9 +425,12 @@
       const tab = document.querySelector(`.tab[data-index="${index}"]`);
       const nameSpan = tab.querySelector('.name');
       const currentName = projects[index].displayName || projects[index].name;
-      
-      nameSpan.innerHTML = `<input class="rename-input" value="${currentName}" />`;
-      const input = nameSpan.querySelector('input');
+
+      nameSpan.textContent = '';
+      const input = document.createElement('input');
+      input.className = 'rename-input';
+      input.value = currentName || '';
+      nameSpan.appendChild(input);
       input.focus();
       input.select();
       
@@ -392,7 +485,7 @@
           html += '<div class="dropdown-divider"></div>';
           html += '<div class="dropdown-label">已打开的窗口</div>';
           html += available.map((w, i) =>
-            `<div class="dropdown-item" data-index="${i}">${w.displayName}</div>`
+            `<div class="dropdown-item" data-index="${i}">${escapeHtml(w.displayName)}</div>`
           ).join('');
         }
 
@@ -482,9 +575,14 @@
 
       try {
         const p = projects[index];
-        await ipcWithTimeout('open-project', [p.path || p.displayName], 10000);
+        const result = await ipcWithTimeout('open-project', [p.path || p.displayName], 10000);
+        if (!result || !result.ok) {
+          const fallbackName = p.displayName || p.path || '该项目';
+          showToast(result && result.message ? result.message : `打开失败：${fallbackName}`);
+        }
       } catch (e) {
         console.error('[openProject]', e);
+        showToast('打开项目失败，请重试');
       } finally {
         if (tab) tab.classList.remove('loading');
         isOperationPending = false;

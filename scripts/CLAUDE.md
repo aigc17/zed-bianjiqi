@@ -6,7 +6,7 @@
 
 ## 成员清单
 
-- `start.sh`: 启动脚本，先 pkill 清理残留 Electron 进程，再后台启动新实例
+- `start.sh`: 启动脚本，先 pkill 清理残留 Electron 进程，再通过 `open -a Electron.app --args` 启动并做存活校验（失败时输出 fallback 日志）
 - `stop.sh`: 关闭脚本，杀掉所有相关进程，残留时强制 kill -9
 - `restart.sh`: 重启脚本，调用 stop.sh + start.sh
 

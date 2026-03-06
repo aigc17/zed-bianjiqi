@@ -11,7 +11,7 @@
 
 const { app, BrowserWindow, ipcMain, screen, globalShortcut } = require('electron');
 const path = require('path');
-const { exec, spawn } = require('child_process');
+const { spawn } = require('child_process');
 const fs = require('fs');
 
 // ============================================================================
@@ -43,12 +43,17 @@ const ZED_DB_PATH = path.join(app.getPath('home'), 'Library/Application Support/
 const BAR_HEIGHT = 36;
 const ZED_WORKSPACE_CACHE_TTL_MS = 60 * 1000;
 const OSASCRIPT_TIMEOUT_MS = 3000;
+const SQLITE_TIMEOUT_MS = 2000;
+const HIDE_CHECK_INTERVAL_MS = 1000;
+const ZED_ADJUST_DEBOUNCE_MS = 1500;
 
 let mainWindow = null;
 let isSystemDialogOpen = false;
 let dialogState = { lastFolderPath: null };
 let zedWorkspaceCache = { mapping: {}, lastUpdated: 0 };
 let zedWorkspaceRefreshPromise = null;
+let projectsMemoryCache = null;
+let hideCheckTimer = null;
 
 // ============================================================================
 // APPLESCRIPT EXECUTOR - 双通道队列，用户操作优先，轮询可丢弃
@@ -58,20 +63,61 @@ const userQueue = [];   // 用户操作：不可丢弃，优先执行
 const pollQueue = [];   // 轮询任务：可丢弃，新任务替换旧任务
 let isScriptRunning = false;
 
-function runAppleScript(script, callback, options) {
-  const { priority = 'user', droppable = false } = options || {};
+function removeQueuedScriptsByTag(tag) {
+  if (!tag) return;
 
+  for (let i = userQueue.length - 1; i >= 0; i--) {
+    if (userQueue[i].tag === tag) {
+      userQueue.splice(i, 1);
+    }
+  }
+  for (let i = pollQueue.length - 1; i >= 0; i--) {
+    if (pollQueue[i].tag === tag) {
+      pollQueue.splice(i, 1);
+    }
+  }
+}
+
+function runAppleScript(script, callback, options = {}) {
+  const {
+    priority = 'user',
+    droppable = false,
+    prepend = false,
+    tag = null,
+    replaceTag = false
+  } = options;
+
+  if (replaceTag && tag) {
+    removeQueuedScriptsByTag(tag);
+  }
+
+  const entry = { script, callback, tag };
   if (priority === 'poll') {
-    // 轮询通道：droppable 任务入队时替换旧的，防止堆积
     if (droppable) {
       pollQueue.length = 0;
     }
-    pollQueue.push({ script, callback, droppable });
+    pollQueue.push(entry);
+  } else if (prepend) {
+    userQueue.unshift(entry);
   } else {
-    userQueue.push({ script, callback });
+    userQueue.push(entry);
   }
-
   processScriptQueue();
+}
+
+function runAppleScriptIfIdle(script, callback, options = {}) {
+  if (isScriptRunning || userQueue.length > 0 || pollQueue.length > 0) return false;
+  runAppleScript(script, callback, options);
+  return true;
+}
+
+function runAppleScriptPromise(script, options = {}) {
+  return new Promise((resolve, reject) => {
+    runAppleScript(script, (err, stdout) => {
+      if (err) return reject(err);
+      resolve(stdout || '');
+    }, options);
+  });
 }
 
 function processScriptQueue() {
@@ -152,19 +198,23 @@ function createWindow() {
 // ============================================================================
 
 async function loadProjects() {
+  if (projectsMemoryCache) return projectsMemoryCache;
+
   try {
     if (fs.existsSync(CONFIG_PATH)) {
-      let projects = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf-8'));
+      const rawProjects = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf-8'));
+      const sourceProjects = Array.isArray(rawProjects) ? rawProjects : [];
 
       // 数据迁移：旧格式 { name } -> 新格式 { path, displayName }
-      let needsMigration = false;
-      const workspaces = await getZedWorkspacesFresh();
+      const needsMigration = sourceProjects.some(p => (
+        p && p.name && !p.path && !p.displayName
+      ));
+      const workspaces = needsMigration ? await getZedWorkspacesFresh() : null;
 
-      projects = projects.map(p => {
+      const projects = sourceProjects.map(p => {
         if (p.name && !p.path && !p.displayName) {
           // 旧格式，需要迁移
-          needsMigration = true;
-          const projectPath = workspaces[p.name] || null;
+          const projectPath = workspaces ? (workspaces[p.name] || null) : null;
           return {
             path: projectPath,
             displayName: p.name,
@@ -184,17 +234,20 @@ async function loadProjects() {
         console.log('Migrated projects to new format');
       }
 
+      projectsMemoryCache = projects;
       return projects;
     }
   } catch (e) {
     console.error('Failed to load projects:', e);
   }
-  return [];
+  projectsMemoryCache = [];
+  return projectsMemoryCache;
 }
 
 function saveProjects(projects) {
+  projectsMemoryCache = Array.isArray(projects) ? projects : [];
   try {
-    fs.writeFileSync(CONFIG_PATH, JSON.stringify(projects, null, 2));
+    fs.writeFileSync(CONFIG_PATH, JSON.stringify(projectsMemoryCache, null, 2));
   } catch (e) {
     console.error('Failed to save projects:', e);
   }
@@ -271,27 +324,63 @@ function parseZedWorkspaces(raw) {
   return mapping;
 }
 
+function readZedWorkspaceRowsWithTimeout(timeoutMs = SQLITE_TIMEOUT_MS) {
+  return new Promise((resolve, reject) => {
+    const sql = 'SELECT paths FROM workspaces WHERE paths IS NOT NULL ORDER BY timestamp DESC;';
+    const child = spawn('sqlite3', [ZED_DB_PATH, sql]);
+    let stdout = '';
+    let stderr = '';
+    let killed = false;
+
+    const timer = setTimeout(() => {
+      killed = true;
+      child.kill('SIGKILL');
+    }, timeoutMs);
+
+    child.stdout.on('data', (data) => { stdout += data; });
+    child.stderr.on('data', (data) => { stderr += data; });
+
+    child.on('error', (err) => {
+      clearTimeout(timer);
+      reject(err);
+    });
+
+    child.on('close', (code) => {
+      clearTimeout(timer);
+      if (killed) {
+        reject(new Error('sqlite timeout'));
+        return;
+      }
+      if (code !== 0) {
+        reject(new Error(stderr || `sqlite exit code ${code}`));
+        return;
+      }
+      resolve(stdout);
+    });
+  });
+}
+
 function refreshZedWorkspaces() {
   if (zedWorkspaceRefreshPromise) return zedWorkspaceRefreshPromise;
 
   zedWorkspaceRefreshPromise = new Promise((resolve) => {
-    const sql = 'SELECT paths FROM workspaces WHERE paths IS NOT NULL ORDER BY timestamp DESC;';
-    exec(`sqlite3 '${ZED_DB_PATH}' "${sql}"`, (err, stdout) => {
-      if (err) {
+    readZedWorkspaceRowsWithTimeout()
+      .then((stdout) => {
+        const output = stdout ? stdout.trim() : '';
+        const mapping = output ? parseZedWorkspaces(output) : {};
+        zedWorkspaceCache = {
+          mapping,
+          lastUpdated: Date.now(),
+        };
+        resolve(mapping);
+      })
+      .catch((err) => {
         console.error('Failed to read Zed database:', err);
+        resolve(zedWorkspaceCache.mapping);
+      })
+      .finally(() => {
         zedWorkspaceRefreshPromise = null;
-        return resolve(zedWorkspaceCache.mapping);
-      }
-
-      const output = stdout ? stdout.trim() : '';
-      const mapping = output ? parseZedWorkspaces(output) : {};
-      zedWorkspaceCache = {
-        mapping,
-        lastUpdated: Date.now(),
-      };
-      zedWorkspaceRefreshPromise = null;
-      resolve(mapping);
-    });
+      });
   });
 
   return zedWorkspaceRefreshPromise;
@@ -340,7 +429,30 @@ function adjustZedWindows() {
       end repeat
     end tell
   end tell`;
-  runAppleScript(script);
+  runAppleScript(script, null, { tag: 'adjust-zed-windows', replaceTag: true });
+}
+
+function toAppleScriptString(value) {
+  const normalized = String(value || '');
+  const escaped = normalized
+    .replace(/\\/g, '\\\\')
+    .replace(/"/g, '\\"');
+  return `"${escaped}"`;
+}
+
+function openProjectPathInZed(projectPath) {
+  return new Promise((resolve) => {
+    if (!projectPath) return resolve(false);
+
+    const child = spawn('open', ['-a', 'Zed', projectPath]);
+    child.on('error', (err) => {
+      console.error('Failed to open project in Zed:', err);
+      resolve(false);
+    });
+    child.on('close', (code) => {
+      resolve(code === 0);
+    });
+  });
 }
 
 function getZedWindows() {
@@ -383,10 +495,12 @@ function getZedWindows() {
   });
 }
 
-function activateZedWindowByName(windowName) {
+async function activateZedWindowByName(windowName) {
+  if (!windowName) return false;
+
   const match = windowName.match(/^empty project \((\d+)\)$/);
   if (match) {
-    const index = parseInt(match[1]);
+    const index = parseInt(match[1], 10);
     const script = `tell application "System Events"
       tell process "Zed"
         set emptyCount to 0
@@ -402,14 +516,24 @@ function activateZedWindowByName(windowName) {
         end repeat
       end tell
     end tell`;
-    runAppleScript(script);
-    return;
+    try {
+      const output = await runAppleScriptPromise(script, {
+        prepend: true,
+        tag: 'activate-zed-window',
+        replaceTag: true
+      });
+      return output.trim() === 'activated';
+    } catch (err) {
+      return false;
+    }
   }
 
+  const exactName = toAppleScriptString(windowName);
+  const prefixName = toAppleScriptString(`${windowName} — `);
   const script = `tell application "System Events"
     tell process "Zed"
       repeat with w in every window
-        if name of w is "${windowName}" or name of w starts with "${windowName} — " then
+        if name of w is ${exactName} or name of w starts with ${prefixName} then
           perform action "AXRaise" of w
           set frontmost to true
           return "activated"
@@ -417,7 +541,16 @@ function activateZedWindowByName(windowName) {
       end repeat
     end tell
   end tell`;
-  runAppleScript(script);
+  try {
+    const output = await runAppleScriptPromise(script, {
+      prepend: true,
+      tag: 'activate-zed-window',
+      replaceTag: true
+    });
+    return output.trim() === 'activated';
+  } catch (err) {
+    return false;
+  }
 }
 
 // ============================================================================
@@ -431,15 +564,49 @@ ipcMain.handle('save-projects', (_, projects) => {
   return true;
 });
 
-ipcMain.handle('open-project', (_, pathOrName) => {
-  // 如果是路径，先尝试用路径的 basename 匹配窗口
-  if (pathOrName && pathOrName.startsWith('/')) {
-    const projectName = path.basename(pathOrName);
-    activateZedWindowByName(projectName);
-  } else {
-    activateZedWindowByName(pathOrName);
+ipcMain.handle('open-project', async (_, pathOrName) => {
+  if (!pathOrName) {
+    return {
+      ok: false,
+      activated: false,
+      opened: false,
+      message: '项目信息为空，无法打开'
+    };
   }
-  return true;
+
+  // 有路径：先激活同名已打开窗口；如果没有匹配到，则自动打开该路径
+  if (pathOrName.startsWith('/')) {
+    const projectPath = pathOrName;
+    const projectName = path.basename(projectPath);
+    const activated = await activateZedWindowByName(projectName);
+
+    if (activated) {
+      return { ok: true, activated: true, opened: false, message: '' };
+    }
+
+    const opened = await openProjectPathInZed(projectPath);
+    if (opened) {
+      return { ok: true, activated: false, opened: true, message: '' };
+    }
+    return {
+      ok: false,
+      activated: false,
+      opened: false,
+      message: `未找到已打开窗口，且新开项目失败：${projectName}`
+    };
+  }
+
+  // 无路径：只能按窗口名激活
+  const activated = await activateZedWindowByName(pathOrName);
+  if (activated) {
+    return { ok: true, activated: true, opened: false, message: '' };
+  }
+  return {
+    ok: false,
+    activated: false,
+    opened: false,
+    message: `未找到已打开窗口：${pathOrName}`
+  };
 });
 
 ipcMain.handle('get-zed-windows', () => getZedWindows());
@@ -499,9 +666,8 @@ ipcMain.handle('select-folder', async (event) => {
   }
 });
 
-ipcMain.handle('open-folder-in-zed', (_, folderPath) => {
-  // 使用 open -a Zed，因为 zed CLI 可能不在 Electron 的 PATH 里
-  exec(`open -a Zed "${folderPath}"`);
+ipcMain.handle('open-folder-in-zed', async (_, folderPath) => {
+  await openProjectPathInZed(folderPath);
   return path.basename(folderPath);
 });
 
@@ -512,8 +678,9 @@ ipcMain.handle('open-folder-in-zed', (_, folderPath) => {
 function startHideCheck() {
   let lastFrontApp = '';
   let isPollInFlight = false;
+  let lastAdjustAt = 0;
 
-  setInterval(() => {
+  hideCheckTimer = setInterval(() => {
     if (isSystemDialogOpen) return;
     // 上次轮询还没返回，跳过本次
     if (isPollInFlight) return;
@@ -522,7 +689,6 @@ function startHideCheck() {
     const script = 'tell application "System Events" to get name of first process whose frontmost is true';
     runAppleScript(script, (err, stdout) => {
       isPollInFlight = false;
-
       const win = mainWindow;
       if (err || !win || win.isDestroyed()) return;
 
@@ -543,11 +709,22 @@ function startHideCheck() {
       }
 
       if (frontApp === 'zed' && lastFrontApp !== 'zed') {
-        adjustZedWindows();
+        const now = Date.now();
+        if (now - lastAdjustAt >= ZED_ADJUST_DEBOUNCE_MS) {
+          lastAdjustAt = now;
+          adjustZedWindows();
+        }
       }
       lastFrontApp = frontApp;
     }, { priority: 'poll', droppable: true });
-  }, 1000);
+  }, HIDE_CHECK_INTERVAL_MS);
+}
+
+function stopHideCheck() {
+  if (hideCheckTimer) {
+    clearInterval(hideCheckTimer);
+    hideCheckTimer = null;
+  }
 }
 
 app.whenReady().then(() => {
@@ -568,13 +745,17 @@ app.whenReady().then(() => {
       const p = projects[i - 1];
       if (p) {
         const name = p.path ? path.basename(p.path) : p.displayName;
-        activateZedWindowByName(name);
+        const activated = await activateZedWindowByName(name);
+        if (!activated && p.path) {
+          await openProjectPathInZed(p.path);
+        }
       }
     });
   }
 });
 
 app.on('window-all-closed', () => {
+  stopHideCheck();
   globalShortcut.unregisterAll();
   // 工具类应用：关窗即退出，不留僵尸进程
   app.quit();
@@ -587,5 +768,6 @@ app.on('activate', () => {
 });
 
 app.on('will-quit', () => {
+  stopHideCheck();
   globalShortcut.unregisterAll();
 });
