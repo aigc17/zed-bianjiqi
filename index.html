@@ -59,22 +59,25 @@
     }
     .tab:hover { background: rgba(255, 255, 255, 0.15); color: #fff; }
     .tab.active {
-      background: linear-gradient(135deg, rgba(99, 102, 241, 0.9), rgba(79, 70, 229, 0.82));
-      border-color: rgba(255, 255, 255, 0.22);
-      box-shadow: 0 8px 18px rgba(79, 70, 229, 0.28);
+      background: linear-gradient(135deg, rgba(22, 163, 74, 0.96), rgba(21, 128, 61, 0.9));
+      border-color: rgba(187, 247, 208, 0.38);
+      box-shadow: 0 10px 22px rgba(22, 163, 74, 0.38), 0 0 0 1px rgba(34, 197, 94, 0.12);
       color: #fff;
     }
     .tab.custom-color {
-      background: var(--tab-bg);
+      background: linear-gradient(135deg, var(--tab-bg-start), var(--tab-bg-end));
+      border-color: var(--tab-border);
+      box-shadow: 0 8px 18px var(--tab-shadow);
       color: #fff;
     }
     .tab.custom-color:hover {
-      background: var(--tab-bg-hover);
+      background: linear-gradient(135deg, var(--tab-hover-start), var(--tab-hover-end));
+      box-shadow: 0 10px 22px var(--tab-shadow-hover);
     }
     .tab.custom-color.active {
-      background: var(--tab-bg-active);
-      border-color: rgba(255, 255, 255, 0.24);
-      box-shadow: 0 8px 18px rgba(0, 0, 0, 0.24);
+      background: linear-gradient(135deg, var(--tab-active-start), var(--tab-active-end));
+      border-color: var(--tab-border-active);
+      box-shadow: 0 12px 24px var(--tab-shadow-active), 0 0 0 1px var(--tab-ring);
     }
     .tab .name { font-weight: 500; }
     .tab.active .name { font-weight: 700; }
@@ -84,11 +87,13 @@
     .tab .active-badge {
       padding: 1px 6px;
       border-radius: 999px;
-      background: rgba(255, 255, 255, 0.18);
+      background: linear-gradient(135deg, rgba(34, 197, 94, 0.98), rgba(21, 128, 61, 0.94));
       color: #fff;
       font-size: 10px;
       font-weight: 700;
       letter-spacing: 0.04em;
+      border: 1px solid rgba(255, 255, 255, 0.88);
+      box-shadow: 0 6px 14px rgba(22, 163, 74, 0.28), inset 0 0 0 1px rgba(255, 255, 255, 0.12);
     }
     .tab .close {
       opacity: 0; margin-left: 4px; width: 14px; height: 14px;
@@ -291,7 +296,7 @@
       });
     }
 
-    const COLORS = ['#e91e63', '#00bfa5', '#c6a700', '#2196f3', '#9c27b0', '#00bcd4'];
+    const COLORS = ['#487f56', '#4b7c72', '#4d6b80', '#4f5982', '#645185', '#815675', '#7e614e', '#6f7750'];
 
     let projects = [];
     let activeProject = null;
@@ -317,15 +322,46 @@
       return `rgba(${r}, ${g}, ${b}, ${alpha})`;
     }
 
+    function mixHexColor(hex, mix = 0) {
+      if (!hex) return '';
+      const normalized = hex.replace('#', '').trim();
+      const expanded = normalized.length === 3
+        ? normalized.split('').map(ch => ch + ch).join('')
+        : normalized;
+
+      if (!/^[0-9a-fA-F]{6}$/.test(expanded)) return '';
+
+      const mixChannel = (offset, target) => {
+        const value = parseInt(expanded.slice(offset, offset + 2), 16);
+        return Math.max(0, Math.min(255, Math.round(value + (target - value) * Math.abs(mix))));
+      };
+
+      const target = mix >= 0 ? 255 : 0;
+      const r = mixChannel(0, target);
+      const g = mixChannel(2, target);
+      const b = mixChannel(4, target);
+      return `rgb(${r}, ${g}, ${b})`;
+    }
+
     function getTabColorStyle(color) {
       if (!color) return '';
 
-      const base = hexToRgba(color, 0.34);
-      const hover = hexToRgba(color, 0.48);
-      const active = hexToRgba(color, 0.62);
-      if (!base || !hover || !active) return '';
+      const bgStart = mixHexColor(color, 0.06);
+      const bgEnd = mixHexColor(color, -0.12);
+      const hoverStart = mixHexColor(color, 0.1);
+      const hoverEnd = mixHexColor(color, -0.08);
+      const activeStart = mixHexColor(color, 0.13);
+      const activeEnd = mixHexColor(color, -0.14);
+      const border = hexToRgba(color, 0.16);
+      const borderActive = hexToRgba(color, 0.24);
+      const shadow = hexToRgba(color, 0.1);
+      const shadowHover = hexToRgba(color, 0.14);
+      const shadowActive = hexToRgba(color, 0.2);
+      const ring = hexToRgba(color, 0.08);
 
-      return `--tab-bg:${base};--tab-bg-hover:${hover};--tab-bg-active:${active};`;
+      if (!bgStart || !bgEnd || !hoverStart || !hoverEnd || !activeStart || !activeEnd) return '';
+
+      return `--tab-bg-start:${bgStart};--tab-bg-end:${bgEnd};--tab-hover-start:${hoverStart};--tab-hover-end:${hoverEnd};--tab-active-start:${activeStart};--tab-active-end:${activeEnd};--tab-border:${border};--tab-border-active:${borderActive};--tab-shadow:${shadow};--tab-shadow-hover:${shadowHover};--tab-shadow-active:${shadowActive};--tab-ring:${ring};`;
     }
 
     function escapeHtml(value) {
