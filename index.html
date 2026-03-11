@@ -75,9 +75,9 @@
       box-shadow: 0 10px 22px var(--tab-shadow-hover);
     }
     .tab.custom-color.active {
-      background: linear-gradient(135deg, var(--tab-active-start), var(--tab-active-end));
-      border-color: var(--tab-border-active);
-      box-shadow: 0 12px 24px var(--tab-shadow-active), 0 0 0 1px var(--tab-ring);
+      background: linear-gradient(135deg, rgba(22, 163, 74, 0.96), rgba(21, 128, 61, 0.9));
+      border-color: rgba(187, 247, 208, 0.38);
+      box-shadow: 0 10px 22px rgba(22, 163, 74, 0.38), 0 0 0 1px rgba(34, 197, 94, 0.12);
     }
     .tab .name { font-weight: 500; }
     .tab.active .name { font-weight: 700; }
@@ -87,13 +87,13 @@
     .tab .active-badge {
       padding: 1px 6px;
       border-radius: 999px;
-      background: linear-gradient(135deg, rgba(34, 197, 94, 0.98), rgba(21, 128, 61, 0.94));
+      background: linear-gradient(135deg, rgba(251, 146, 60, 0.98), rgba(234, 88, 12, 0.94));
       color: #fff;
       font-size: 10px;
       font-weight: 700;
       letter-spacing: 0.04em;
       border: 1px solid rgba(255, 255, 255, 0.88);
-      box-shadow: 0 6px 14px rgba(22, 163, 74, 0.28), inset 0 0 0 1px rgba(255, 255, 255, 0.12);
+      box-shadow: 0 6px 14px rgba(234, 88, 12, 0.28), inset 0 0 0 1px rgba(255, 255, 255, 0.12);
     }
     .tab .close {
       opacity: 0; margin-left: 4px; width: 14px; height: 14px;
@@ -296,7 +296,7 @@
       });
     }
 
-    const COLORS = ['#487f56', '#4b7c72', '#4d6b80', '#4f5982', '#645185', '#815675', '#7e614e', '#6f7750'];
+    const COLORS = ['#4b7c72', '#4d6b80', '#4f5982', '#645185', '#815675', '#7e614e', '#6f7750'];
 
     let projects = [];
     let activeProject = null;
