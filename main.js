@@ -1,23 +1,20 @@
 /**
  * [INPUT]: electron - Electron 框架
- * [INPUT]: AppleScript - macOS 窗口控制，通过 System Events 检测/激活 Zed 窗口
+ * [INPUT]: AppleScript + lsappinfo - macOS 窗口控制与真实前台应用探测
  * [INPUT]: Zed SQLite DB - 异步读取并缓存工作区路径信息
  * [INPUT]: dialog_state.json - 记录上次选择的目录，用于系统对话框 defaultPath（避开慢路径）
- * [OUTPUT]: 主进程，创建悬浮标签栏窗口，提供 IPC 接口与当前激活项目同步（含系统对话框前置处理、默认路径优化与前台进程精确判定）
- * [POS]: 应用入口，管理窗口生命周期、IPC 通信、智能切换 Zed 窗口，并把真实前台项目状态同步给渲染层
+ * [OUTPUT]: 主进程，创建悬浮标签栏窗口，提供 IPC 接口与当前激活项目同步（含系统对话框前置处理、默认路径优化与真实前台应用判定）
+ * [POS]: 应用入口，管理窗口生命周期、IPC 通信、智能切换 Zed 窗口，并把真实前台项目状态同步给渲染层，规避 Electron 悬浮窗误报前台
  *
  * [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
  */
-
 const { app, BrowserWindow, ipcMain, screen, globalShortcut } = require('electron');
 const path = require('path');
 const { spawn } = require('child_process');
 const fs = require('fs');
-
 // ============================================================================
 // SINGLE INSTANCE LOCK - 防止多开僵尸进程
 // ============================================================================
-
 const gotTheLock = app.requestSingleInstanceLock();
 if (!gotTheLock) {
   // 已有实例运行，直接退出
@@ -32,11 +29,9 @@ if (!gotTheLock) {
     }
   });
 }
-
 // ============================================================================
 // CONFIG
 // ============================================================================
-
 const CONFIG_PATH = path.join(app.getPath('userData'), 'projects.json');
 const DIALOG_STATE_PATH = path.join(app.getPath('userData'), 'dialog_state.json');
 const ZED_DB_PATH = path.join(app.getPath('home'), 'Library/Application Support/Zed/db/0-stable/db.sqlite');
@@ -47,8 +42,8 @@ const SQLITE_TIMEOUT_MS = 2000;
 const HIDE_CHECK_INTERVAL_MS = 1000;
 const ZED_ADJUST_DEBOUNCE_MS = 1500;
 const FRONT_STATE_SEPARATOR = '||';
-const FRONT_STATE_SCRIPT = `tell application "System Events"\nset frontProcess to first process whose frontmost is true\nset frontApp to name of frontProcess\nset frontPid to unix id of frontProcess\nif frontApp is "Zed" then\n  tell process "Zed"\n    if (count of windows) > 0 then return frontApp & "${FRONT_STATE_SEPARATOR}" & frontPid & "${FRONT_STATE_SEPARATOR}" & name of front window\n  end tell\nend if\nreturn frontApp & "${FRONT_STATE_SEPARATOR}" & frontPid\nend tell`;
-
+const LSAPPINFO_FRONT_COMMAND = 'lsappinfo info "$(lsappinfo front | tr -d \'\\n\')"';
+const ZED_FRONT_WINDOW_NAME_SCRIPT = `tell application "System Events"\ntell process "Zed"\nif (count of windows) > 0 then return name of front window\nend tell\nend tell`;
 let mainWindow = null;
 let isSystemDialogOpen = false;
 let dialogState = { lastFolderPath: null };
@@ -57,48 +52,27 @@ let zedWorkspaceRefreshPromise = null;
 let projectsMemoryCache = null;
 let hideCheckTimer = null;
 let activeProject = null;
-
 // ============================================================================
 // APPLESCRIPT EXECUTOR - 双通道队列，用户操作优先，轮询可丢弃
 // ============================================================================
-
 const userQueue = [];   // 用户操作：不可丢弃，优先执行
 const pollQueue = [];   // 轮询任务：可丢弃，新任务替换旧任务
 let isScriptRunning = false;
-
 function removeQueuedScriptsByTag(tag) {
   if (!tag) return;
-
   for (let i = userQueue.length - 1; i >= 0; i--) {
-    if (userQueue[i].tag === tag) {
-      userQueue.splice(i, 1);
-    }
+    if (userQueue[i].tag === tag) userQueue.splice(i, 1);
   }
   for (let i = pollQueue.length - 1; i >= 0; i--) {
-    if (pollQueue[i].tag === tag) {
-      pollQueue.splice(i, 1);
-    }
+    if (pollQueue[i].tag === tag) pollQueue.splice(i, 1);
   }
 }
-
 function runAppleScript(script, callback, options = {}) {
-  const {
-    priority = 'user',
-    droppable = false,
-    prepend = false,
-    tag = null,
-    replaceTag = false
-  } = options;
-
-  if (replaceTag && tag) {
-    removeQueuedScriptsByTag(tag);
-  }
-
+  const { priority = 'user', droppable = false, prepend = false, tag = null, replaceTag = false } = options;
+  if (replaceTag && tag) removeQueuedScriptsByTag(tag);
   const entry = { script, callback, tag };
   if (priority === 'poll') {
-    if (droppable) {
-      pollQueue.length = 0;
-    }
+    if (droppable) pollQueue.length = 0;
     pollQueue.push(entry);
   } else if (prepend) {
     userQueue.unshift(entry);
@@ -107,13 +81,6 @@ function runAppleScript(script, callback, options = {}) {
   }
   processScriptQueue();
 }
-
-function runAppleScriptIfIdle(script, callback, options = {}) {
-  if (isScriptRunning || userQueue.length > 0 || pollQueue.length > 0) return false;
-  runAppleScript(script, callback, options);
-  return true;
-}
-
 function runAppleScriptPromise(script, options = {}) {
   return new Promise((resolve, reject) => {
     runAppleScript(script, (err, stdout) => {
@@ -122,23 +89,18 @@ function runAppleScriptPromise(script, options = {}) {
     }, options);
   });
 }
-
 function processScriptQueue() {
   if (isScriptRunning) return;
-
   // 用户队列优先
   const task = userQueue.shift() || pollQueue.shift();
   if (!task) return;
-
   isScriptRunning = true;
   const { script, callback } = task;
-
   const child = spawn('osascript', ['-e', script]);
   let stdout = '';
   let stderr = '';
   let killed = false;
   let callbackCalled = false;
-
   // 安全回调：close + error 都可能触发，只调用一次
   function safeCallback(err, result) {
     if (callbackCalled) return;
@@ -148,34 +110,52 @@ function processScriptQueue() {
     callback && callback(err, result);
     setImmediate(processScriptQueue);
   }
-
-  const timeout = setTimeout(() => {
-    killed = true;
-    child.kill('SIGKILL');
-  }, OSASCRIPT_TIMEOUT_MS);
-
+  const timeout = setTimeout(() => { killed = true; child.kill('SIGKILL'); }, OSASCRIPT_TIMEOUT_MS);
   child.stdout.on('data', (data) => { stdout += data; });
   child.stderr.on('data', (data) => { stderr += data; });
-
   child.on('close', (code) => {
-    if (killed) {
-      safeCallback(new Error('timeout'), '');
-    } else if (code !== 0) {
-      safeCallback(new Error(stderr), '');
-    } else {
-      safeCallback(null, stdout);
-    }
+    if (killed) return safeCallback(new Error('timeout'), '');
+    if (code !== 0) return safeCallback(new Error(stderr), '');
+    safeCallback(null, stdout);
   });
-
   child.on('error', (err) => {
     safeCallback(err, '');
   });
 }
-
+function getFrontState(callback) {
+  const child = spawn('sh', ['-lc', LSAPPINFO_FRONT_COMMAND]);
+  let stdout = '';
+  let stderr = '';
+  let killed = false;
+  let callbackCalled = false;
+  const safeCallback = (err, result) => {
+    if (callbackCalled) return;
+    callbackCalled = true;
+    clearTimeout(timeout);
+    callback(err, result);
+  };
+  const timeout = setTimeout(() => { killed = true; child.kill('SIGKILL'); }, OSASCRIPT_TIMEOUT_MS);
+  child.stdout.on('data', (data) => { stdout += data; });
+  child.stderr.on('data', (data) => { stderr += data; });
+  child.on('close', (code) => {
+    if (killed) return safeCallback(new Error('timeout'));
+    if (code !== 0) return safeCallback(new Error(stderr || 'lsappinfo failed'));
+    const match = stdout.match(/^"([^"]+)".*?\bpid = (\d+)/ms);
+    if (!match) return safeCallback(new Error('invalid lsappinfo output'));
+    const frontApp = match[1];
+    const frontPid = Number(match[2]);
+    if (frontApp !== 'Zed') return safeCallback(null, { frontApp, frontPid, frontWindowName: '' });
+    runAppleScript(ZED_FRONT_WINDOW_NAME_SCRIPT, (err, output) => {
+      safeCallback(err, { frontApp, frontPid, frontWindowName: (output || '').trim() });
+    }, { priority: 'poll', droppable: true, tag: 'front-zed-window', replaceTag: true });
+  });
+  child.on('error', (err) => {
+    safeCallback(err);
+  });
+}
 // ============================================================================
 // WINDOW CREATION
 // ============================================================================
-
 function getWindowConfig() {
   const { width } = screen.getPrimaryDisplay().workAreaSize;
   return {
@@ -186,7 +166,6 @@ function getWindowConfig() {
     webPreferences: { nodeIntegration: true, contextIsolation: false },
   };
 }
-
 function createWindow() {
   mainWindow = new BrowserWindow(getWindowConfig());
   mainWindow.loadFile('index.html');
@@ -198,7 +177,6 @@ function createWindow() {
 // ============================================================================
 // PROJECT DATA
 // ============================================================================
-
 async function loadProjects() {
   if (projectsMemoryCache) return projectsMemoryCache;
 
@@ -708,14 +686,14 @@ function startHideCheck() {
     if (isPollInFlight) return;
 
     isPollInFlight = true;
-    runAppleScript(FRONT_STATE_SCRIPT, (err, stdout) => {
+    getFrontState((err, frontState) => {
       isPollInFlight = false;
       const win = mainWindow;
       if (err || !win || win.isDestroyed()) return;
 
-      const [frontAppRaw, frontPidRaw = '', frontWindowName = ''] = stdout.trim().split(FRONT_STATE_SEPARATOR);
-      const frontApp = frontAppRaw.trim().toLowerCase();
-      const frontPid = Number(frontPidRaw);
+      const frontApp = String(frontState.frontApp || '').trim().toLowerCase();
+      const frontPid = Number(frontState.frontPid);
+      const frontWindowName = String(frontState.frontWindowName || '');
       const shouldShow = frontApp === 'zed' || frontPid === process.pid;
 
       if (frontApp === 'zed') {
@@ -743,7 +721,7 @@ function startHideCheck() {
         }
       }
       lastFrontApp = frontApp;
-    }, { priority: 'poll', droppable: true });
+    });
   }, HIDE_CHECK_INTERVAL_MS);
 }
 
